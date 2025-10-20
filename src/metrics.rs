@@ -1,87 +1,69 @@
-use once_cell::sync::OnceCell;
-use opentelemetry::Context as OtelContext;
 use opentelemetry::KeyValue;
-use opentelemetry::metrics::UpDownCounter;
-use opentelemetry::metrics::{Counter, Histogram};
+use opentelemetry::global;
 use opentelemetry::metrics::{
-    Counter as OtelCounter, Histogram as OtelHistogram, Meter, MeterProvider, ObservableGauge,
+    Counter as OtelCounter, Gauge as OtelGauge, Histogram as OtelHistogram,
 };
-use opentelemetry_sdk::Resource;
-use opentelemetry_sdk::metrics::{ManualReader, MeterProviderBuilder, SdkMeterProvider};
-use std::sync::Arc;
+use opentelemetry::trace::TraceContextExt;
+use tracing::Span;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-use crate::context::CloudCtx;
 use crate::init::TELEMETRY_STATE;
 
-static METER_PROVIDER: OnceCell<Option<Arc<SdkMeterProvider>>> = OnceCell::new();
-
-#[derive(Clone)]
-pub struct CounterWrapper {
-    counter: Option<OtelCounter<f64>>,
+#[derive(Clone, Debug)]
+pub struct Counter {
+    inner: Option<OtelCounter<f64>>,
 }
 
-impl CounterWrapper {
+impl Counter {
     pub fn add(&self, value: f64) {
-        if let Some(counter) = &self.counter {
-            counter.add(&OtelContext::current(), value, &attributes());
+        if let Some(counter) = &self.inner {
+            counter.add(value, &attributes());
         }
     }
 }
 
-#[derive(Clone)]
-pub struct GaugeWrapper;
-
-impl GaugeWrapper {
-    pub fn record(&self, _value: f64) {
-        // No-op gauge; placeholder for future use.
-    }
+#[derive(Clone, Debug)]
+pub struct Gauge {
+    inner: Option<OtelGauge<f64>>,
 }
 
-#[derive(Clone)]
-pub struct HistogramWrapper {
-    histogram: Option<OtelHistogram<f64>>,
-}
-
-impl HistogramWrapper {
+impl Gauge {
     pub fn record(&self, value: f64) {
-        if let Some(histogram) = &self.histogram {
-            histogram.record(&OtelContext::current(), value, &attributes());
+        if let Some(gauge) = &self.inner {
+            gauge.record(value, &attributes());
         }
     }
 }
 
-pub fn setup_meter_provider(provider: Option<SdkMeterProvider>) {
-    let _ = METER_PROVIDER.set(provider.map(Arc::new));
+#[derive(Clone, Debug)]
+pub struct Histogram {
+    inner: Option<OtelHistogram<f64>>,
 }
 
-pub fn counter(name: &'static str) -> CounterWrapper {
-    let instrument = meter()
-        .map(|meter| meter.f64_counter(name).build())
-        .transpose();
-    CounterWrapper {
-        counter: instrument.ok().flatten(),
+impl Histogram {
+    pub fn record(&self, value: f64) {
+        if let Some(histogram) = &self.inner {
+            histogram.record(value, &attributes());
+        }
     }
 }
 
-pub fn gauge(_name: &'static str) -> GaugeWrapper {
-    GaugeWrapper
+pub fn counter(name: &'static str) -> Counter {
+    let meter = global::meter("greentic-telemetry");
+    let inner = meter.f64_counter(name).try_init().ok();
+    Counter { inner }
 }
 
-pub fn histogram(name: &'static str) -> HistogramWrapper {
-    let instrument = meter()
-        .map(|meter| meter.f64_histogram(name).build())
-        .transpose();
-    HistogramWrapper {
-        histogram: instrument.ok().flatten(),
-    }
+pub fn gauge(name: &'static str) -> Gauge {
+    let meter = global::meter("greentic-telemetry");
+    let inner = meter.f64_gauge(name).try_init().ok();
+    Gauge { inner }
 }
 
-fn meter() -> Option<Meter> {
-    METER_PROVIDER.get().and_then(|provider| {
-        provider
-            .as_ref()
-            .map(|provider| provider.meter("greentic-telemetry"))
-    })
+pub fn histogram(name: &'static str) -> Histogram {
+    let meter = global::meter("greentic-telemetry");
+    let inner = meter.f64_histogram(name).try_init().ok();
+    Histogram { inner }
 }
 
 fn attributes() -> Vec<KeyValue> {
@@ -92,12 +74,31 @@ fn attributes() -> Vec<KeyValue> {
             "service.name",
             state.service_name.to_string(),
         ));
+        attrs.push(KeyValue::new(
+            "service.version",
+            state.service_version.to_string(),
+        ));
+        attrs.push(KeyValue::new(
+            "deployment.environment",
+            state.deployment_env.to_string(),
+        ));
 
         for (key, value) in state.context_snapshot() {
             if let Some(value) = value {
-                attrs.push(KeyValue::new(key, value));
+                let masked = crate::redaction::redact_field(key, &value);
+                attrs.push(KeyValue::new(key, masked));
             }
         }
+    }
+
+    let span = Span::current();
+    let span_context = span.context().span().span_context().clone();
+    if span_context.is_valid() {
+        attrs.push(KeyValue::new(
+            "trace_id",
+            span_context.trace_id().to_string(),
+        ));
+        attrs.push(KeyValue::new("span_id", span_context.span_id().to_string()));
     }
 
     attrs

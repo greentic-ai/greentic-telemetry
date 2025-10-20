@@ -193,3 +193,24 @@ sinks:
     inputs: [otlp_grpc]
     endpoint: http://tempo:4317
 ```
+
+## Metrics
+
+- Counters, gauges, and histograms are exposed via `greentic_telemetry::metrics`.
+- When `TELEMETRY_EXPORT` resolves to an OTLP exporter, measurements are forwarded over the same gRPC channel. With `json-stdout`, metrics default to no-ops so instrumentation never needs guard clauses.
+
+```rust
+let requests = greentic_telemetry::metrics::counter("service.requests");
+let latency = greentic_telemetry::metrics::histogram("service.request.duration_ms");
+
+requests.add(1.0);
+latency.record(elapsed_ms);
+```
+
+Every data point automatically includes `service.name`, `service.version`, `deployment.environment`, and the active cloud context (`tenant`, `team`, `flow`, `run_id`). If a tracing span is in scope, exemplar hints (`trace_id`, `span_id`) ride along so compatible collectors can correlate metrics back to traces.
+
+## PII Redaction
+
+- Configure `PII_REDACTION_MODE=off|strict|allowlist` to mask sensitive values before they reach collectors.
+- `strict` masks common tokens, emails, and phone numbers by default; `allowlist` keeps only the fields in `PII_ALLOWLIST_FIELDS` unchanged.
+- Extend masking with `PII_MASK_REGEXES` (comma-separated regexes) to scrub custom patterns.

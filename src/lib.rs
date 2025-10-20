@@ -6,6 +6,7 @@ mod init;
 pub mod metrics;
 mod presets;
 mod propagation;
+mod redaction;
 #[cfg(feature = "wasm-guest")]
 mod wasm_guest;
 #[cfg(feature = "wasm-host")]
@@ -13,6 +14,7 @@ mod wasm_host;
 
 pub use context::{CloudCtx, set_context};
 pub use init::{TelemetryInit, init, shutdown};
+pub use metrics::{Counter, Gauge, Histogram, counter, gauge, histogram};
 pub use propagation::{Carrier, extract_carrier, inject_carrier};
 #[cfg(feature = "wasm-guest")]
 pub use wasm_guest::{

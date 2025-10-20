@@ -23,7 +23,7 @@ use opentelemetry::KeyValue;
 use opentelemetry::global;
 use opentelemetry::trace::TracerProvider as _;
 #[cfg(any(feature = "otlp-grpc", feature = "otlp-http"))]
-use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_otlp::{self, WithExportConfig};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::TracerProvider;
 #[cfg(any(feature = "otlp-grpc", feature = "otlp-http"))]
@@ -129,6 +129,7 @@ pub fn init(init: TelemetryInit, ctx_keys: &[&'static str]) -> Result<()> {
     let mut active_mode = requested_config.mode;
 
     let state = Arc::new(SharedState::new(init, ctx_keys));
+    crate::redaction::init_from_env();
 
     if let Err(err) = LogTracer::init() {
         warnings.push(format!("log tracer already initialized: {err}"));
@@ -164,7 +165,6 @@ pub fn init(init: TelemetryInit, ctx_keys: &[&'static str]) -> Result<()> {
         ExportMode::JsonStdout => {
             #[cfg(feature = "json-stdout")]
             {
-                crate::metrics::setup_meter_provider(None);
                 install_json(&filter, &state)
             }
             #[cfg(not(feature = "json-stdout"))]
@@ -173,7 +173,6 @@ pub fn init(init: TelemetryInit, ctx_keys: &[&'static str]) -> Result<()> {
                     "json-stdout exporter requested but the crate was compiled without the json-stdout feature; logs will not be emitted"
                         .to_string(),
                 );
-                crate::metrics::setup_meter_provider(None);
                 install_json(&filter, &state)
             }
         }
@@ -191,8 +190,6 @@ pub fn init(init: TelemetryInit, ctx_keys: &[&'static str]) -> Result<()> {
                             requested = requested_config.mode
                         ));
                         active_mode = ExportMode::JsonStdout;
-                        crate::metrics::setup_meter_provider(None);
-                        crate::metrics::setup_meter_provider(None);
                         #[cfg(feature = "json-stdout")]
                         {
                             install_json(&filter, &state)
@@ -216,7 +213,6 @@ pub fn init(init: TelemetryInit, ctx_keys: &[&'static str]) -> Result<()> {
                         .to_string(),
                 );
                 active_mode = ExportMode::JsonStdout;
-                crate::metrics::setup_meter_provider(None);
                 #[cfg(feature = "json-stdout")]
                 {
                     install_json(&filter, &state)
@@ -288,7 +284,10 @@ fn install_otlp(
 
     let trace_config = trace::Config::default()
         .with_sampler(sampler)
-        .with_resource(resource);
+        .with_resource(resource.clone());
+
+    #[cfg(any(feature = "otlp-grpc", feature = "otlp-http"))]
+    install_otlp_metrics(&resource, config)?;
 
     let exporter = match config.mode {
         ExportMode::OtlpGrpc => {
@@ -343,8 +342,6 @@ fn install_otlp(
         .build();
 
     let tracer = provider.tracer(state.service_name);
-    crate::metrics::setup_meter_provider(Some(provider.clone()));
-
     global::set_tracer_provider(provider);
 
     let subscriber = Registry::default()
@@ -353,6 +350,62 @@ fn install_otlp(
 
     dispatcher::set_global_default(Dispatch::new(subscriber))
         .map_err(|err| anyhow!("failed to install tracing subscriber: {err}"))
+}
+
+#[cfg(any(feature = "otlp-grpc", feature = "otlp-http"))]
+fn install_otlp_metrics(resource: &Resource, config: &ExportConfig) -> Result<()> {
+    match config.mode {
+        ExportMode::OtlpGrpc => {
+            #[cfg(feature = "otlp-grpc")]
+            {
+                let mut exporter = opentelemetry_otlp::new_exporter().tonic();
+                if let Some(endpoint) = &config.endpoint {
+                    exporter = exporter.with_endpoint(endpoint.clone());
+                }
+                if !config.headers.is_empty() {
+                    let metadata = build_metadata_map(&config.headers)?;
+                    exporter = exporter.with_metadata(metadata);
+                }
+
+                opentelemetry_otlp::new_pipeline()
+                    .metrics(Tokio)
+                    .with_exporter(exporter)
+                    .with_resource(resource.clone())
+                    .build()
+                    .map(|_| ())
+                    .map_err(|err| anyhow!("failed to install OTLP metrics pipeline: {err}"))
+            }
+            #[cfg(not(feature = "otlp-grpc"))]
+            {
+                Ok(())
+            }
+        }
+        ExportMode::OtlpHttp => {
+            #[cfg(feature = "otlp-http")]
+            {
+                let mut exporter = opentelemetry_otlp::new_exporter().http();
+                if let Some(endpoint) = &config.endpoint {
+                    exporter = exporter.with_endpoint(endpoint.clone());
+                }
+                if !config.headers.is_empty() {
+                    exporter = exporter.with_headers(config.headers.clone());
+                }
+
+                opentelemetry_otlp::new_pipeline()
+                    .metrics(Tokio)
+                    .with_exporter(exporter)
+                    .with_resource(resource.clone())
+                    .build()
+                    .map(|_| ())
+                    .map_err(|err| anyhow!("failed to install OTLP metrics pipeline: {err}"))
+            }
+            #[cfg(not(feature = "otlp-http"))]
+            {
+                Ok(())
+            }
+        }
+        ExportMode::JsonStdout => Ok(()),
+    }
 }
 
 #[cfg(feature = "otlp-grpc")]
@@ -431,7 +484,10 @@ where
 
         for (key, value) in self.state.context_snapshot() {
             match value {
-                Some(val) => writer.field_str(key, &val),
+                Some(val) => {
+                    let masked = crate::redaction::redact_field(key, &val);
+                    writer.field_str(key, &masked)
+                }
                 None => writer.field_null(key),
             }
         }
@@ -504,10 +560,9 @@ impl tracing::field::Visit for FieldVisitor {
     }
 
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-        self.values.insert(
-            field.name().to_string(),
-            FieldValue::String(value.to_owned()),
-        );
+        let masked = crate::redaction::redact_field(field.name(), value);
+        self.values
+            .insert(field.name().to_string(), FieldValue::String(masked));
     }
 
     fn record_error(
@@ -515,24 +570,21 @@ impl tracing::field::Visit for FieldVisitor {
         field: &tracing::field::Field,
         value: &(dyn std::error::Error + 'static),
     ) {
-        self.values.insert(
-            field.name().to_string(),
-            FieldValue::String(value.to_string()),
-        );
+        let masked = crate::redaction::redact_field(field.name(), &value.to_string());
+        self.values
+            .insert(field.name().to_string(), FieldValue::String(masked));
     }
 
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        self.values.insert(
-            field.name().to_string(),
-            FieldValue::String(format!("{value:?}")),
-        );
+        let masked = crate::redaction::redact_field(field.name(), &format!("{value:?}"));
+        self.values
+            .insert(field.name().to_string(), FieldValue::String(masked));
     }
 
     fn record_bytes(&mut self, field: &tracing::field::Field, value: &[u8]) {
-        self.values.insert(
-            field.name().to_string(),
-            FieldValue::String(format!("{value:?}")),
-        );
+        let masked = crate::redaction::redact_field(field.name(), &format!("{value:?}"));
+        self.values
+            .insert(field.name().to_string(), FieldValue::String(masked));
     }
 }
 
