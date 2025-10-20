@@ -1,6 +1,7 @@
 //! Telemetry initialization helpers for Greentic services.
 
 mod context;
+pub mod dev;
 mod export;
 mod init;
 pub mod metrics;

@@ -506,7 +506,7 @@ where
 
         writer.finish();
         let bytes = writer.into_bytes();
-
+        crate::dev::maybe_capture(&bytes);
         let mut stdout = io::stdout().lock();
         let _ = stdout.write_all(&bytes);
     }
@@ -514,6 +514,9 @@ where
 
 #[cfg(feature = "json-stdout")]
 fn now_timestamp() -> String {
+    if let Some(fixed) = crate::dev::fixed_timestamp() {
+        return fixed;
+    }
     let now = SystemTime::now();
     match now.duration_since(UNIX_EPOCH) {
         Ok(duration) => {

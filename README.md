@@ -38,16 +38,29 @@ Run the included example to view JSON output:
 cargo run --example stdout
 ```
 
-## Configuration
+### Environment overview
 
-Control exporters and sampling via environment variables:
+| Variable | Description | Default |
+| --- | --- | --- |
+| `TELEMETRY_EXPORT` | Export mode (`json-stdout`, `otlp-grpc`, `otlp-http`) | `json-stdout` |
+| `OTLP_ENDPOINT` | Collector endpoint (e.g. `http://otel-collector:4317`) | _unset_ |
+| `OTLP_HEADERS` | Comma separated headers forwarded to the collector | _unset_ |
+| `TELEMETRY_SAMPLING` | `parent` or `traceidratio:<ratio>` | `parent` |
+| `CLOUD_PRESET` | Cloud preset (`aws`, `gcp`, `azure`, `datadog`, `loki`, `none`) | `none` |
+| `PII_REDACTION_MODE` | `off`, `strict`, `allowlist` | `off` |
+| `PII_ALLOWLIST_FIELDS` | Comma allowlist for PII fields (allowlist mode) | _unset_ |
+| `PII_MASK_REGEXES` | Extra regex masks applied to messages & string fields | _unset_ |
 
-- `TELEMETRY_EXPORT`: `json-stdout` (default), `otlp-grpc`, or `otlp-http`.
-- `OTLP_ENDPOINT`: collector URL (e.g. `http://otel-collector:4317` or `http://collector:4318`).
-- `OTLP_HEADERS`: comma-separated `key=value` pairs forwarded to the collector.
-- `TELEMETRY_SAMPLING`: `parent` (default) or `traceidratio:<ratio>` (e.g. `traceidratio:0.1`).
+When OTLP configuration fails, the crate logs a warning and keeps emitting JSON to stdout (if enabled).
 
-When OTLP configuration fails, the crate logs a warning once and keeps emitting JSON to stdout (if enabled).
+### Runnable examples
+
+```bash
+cargo run --example stdout          # JSON logs to stdout
+cargo run --example nats_propagation
+cargo run --example wasm_host_demo
+cargo run --example otlp_demo       # requires OTLP endpoint
+```
 
 ## Context Propagation
 
@@ -74,6 +87,56 @@ greentic_telemetry::extract_carrier(&headers);
 ```
 
 `inject_carrier` emits W3C `traceparent` / `tracestate` headers and the `x-tenant`, `x-team`, `x-flow`, `x-run-id` identifiers. `extract_carrier` restores the span parentage and rehydrates the context so subsequent logs include the inherited IDs.
+
+### NATS propagation demo
+
+```rust
+use greentic_telemetry::{
+    init, set_context, Carrier, CloudCtx, TelemetryInit, extract_carrier, inject_carrier, prelude::*,
+};
+use std::collections::HashMap;
+
+#[derive(Default)]
+struct Headers(HashMap<String, String>);
+
+impl Carrier for Headers {
+    fn set(&mut self, key: &str, value: String) { self.0.insert(key.to_string(), value); }
+    fn get(&self, key: &str) -> Option<String> { self.0.get(key).cloned() }
+}
+
+fn main() -> anyhow::Result<()> {
+    init(
+        TelemetryInit {
+            service_name: "nats-demo",
+            service_version: "1.0.0",
+            deployment_env: "prod",
+        },
+        &["tenant", "team"],
+    )?;
+
+    set_context(CloudCtx {
+        tenant: Some("alpha"),
+        team: Some("platform"),
+        flow: None,
+        run_id: None,
+    });
+
+    let mut headers = Headers::default();
+    {
+        let span = info_span!("publish");
+        let _guard = span.enter();
+        inject_carrier(&mut headers);
+        info!(subject = "orders.created", "message published");
+    }
+
+    let span = info_span!("consume");
+    let _guard = span.enter();
+    extract_carrier(&headers);
+    info!("message consumed with propagated context");
+
+    Ok(())
+}
+```
 
 ## Cloud Presets
 
@@ -209,8 +272,50 @@ latency.record(elapsed_ms);
 
 Every data point automatically includes `service.name`, `service.version`, `deployment.environment`, and the active cloud context (`tenant`, `team`, `flow`, `run_id`). If a tracing span is in scope, exemplar hints (`trace_id`, `span_id`) ride along so compatible collectors can correlate metrics back to traces.
 
+## WASM guests / host tools
+
+The `wit/greentic-telemetry.wit` package exposes a narrow logging interface that WASM guests can rely on. With `wit-bindgen`, the guest side becomes:
+
+```rust
+// wasm_guest.rs
+use greentic_telemetry::wasm_guest::{Field, Level, log, span_end, span_start};
+
+pub fn run_tool() {
+    let span = span_start("guest-tool", &[Field { key: "tenant", value: "acme" }]);
+    log(Level::Info, "initialised guest tool", &[]);
+    log(Level::Info, "work complete", &[]);
+    span_end(span);
+}
+```
+
+A native host can forward the guest calls to tracing:
+
+```rust
+use greentic_telemetry::wasm_host::{log as host_log, span_end, span_start, Field, LogLevel};
+
+fn simulate_guest() {
+    let span = span_start("guest-run", &[Field { key: "team", value: "ops" }]);
+    host_log(LogLevel::Info, "guest emitted log", &[]);
+    span_end(span);
+}
+```
+
+See `examples/wasm_host_demo.rs` for a runnable version.
+
 ## PII Redaction
 
 - Configure `PII_REDACTION_MODE=off|strict|allowlist` to mask sensitive values before they reach collectors.
 - `strict` masks common tokens, emails, and phone numbers by default; `allowlist` keeps only the fields in `PII_ALLOWLIST_FIELDS` unchanged.
 - Extend masking with `PII_MASK_REGEXES` (comma-separated regexes) to scrub custom patterns.
+
+## OTLP demo
+
+`cargo run --example otlp_demo` emits a span (`demo.operation`), structured logs, and metrics (`demo.request.count`, `demo.request.duration_ms`). Point `TELEMETRY_EXPORT=otlp-grpc` and `OTLP_ENDPOINT` at a collector before running.
+
+## Troubleshooting
+
+- **No logs**: ensure `RUST_LOG` includes `info` (or higher) and that the collector has a logs pipeline when using OTLP.
+- **Metrics missing**: verify the collector has a metrics pipeline and that it isn’t filtering by resource attributes (`service.*`, `deployment.environment`).
+- **Context lost**: make sure headers survive transport (case sensitivity, lower-case keys for NATS, etc.) and wrap `extract_carrier` inside a span.
+- **Unexpected PII**: enable `PII_REDACTION_MODE=strict` and add custom regexes for service-specific tokens.
+- **Snapshot tests**: use `greentic_telemetry::dev::test_init_for_snapshot()` and `capture_logs` to gather deterministic JSON output with a fixed timestamp.
