@@ -64,7 +64,7 @@ cargo run --example otlp_demo       # requires OTLP endpoint
 
 ## Context Propagation
 
-Use `inject_carrier` / `extract_carrier` to round-trip span context and the Greentic cloud IDs across message boundaries:
+Use `inject_carrier` / `extract_carrier_into_span` to round-trip span context and the Greentic cloud IDs across message boundaries:
 
 ```rust
 struct Headers(HashMap<String, String>);
@@ -82,17 +82,17 @@ greentic_telemetry::inject_carrier(&mut headers);
 
 // Later, on the consumer side:
 let span = tracing::info_span!("handle");
+greentic_telemetry::extract_carrier_into_span(&headers, &span);
 let _guard = span.enter();
-greentic_telemetry::extract_carrier(&headers);
 ```
 
-`inject_carrier` emits W3C `traceparent` / `tracestate` headers and the `x-tenant`, `x-team`, `x-flow`, `x-run-id` identifiers. `extract_carrier` restores the span parentage and rehydrates the context so subsequent logs include the inherited IDs.
+`inject_carrier` emits W3C `traceparent` / `tracestate` headers and the `x-tenant`, `x-team`, `x-flow`, `x-run-id` identifiers. `extract_carrier_into_span` restores the span parentage and rehydrates the context so subsequent logs include the inherited IDs. If you already entered the target span, `extract_carrier` will attempt to apply the context to the current span.
 
 ### NATS propagation demo
 
 ```rust
 use greentic_telemetry::{
-    init, set_context, Carrier, CloudCtx, TelemetryInit, extract_carrier, inject_carrier, prelude::*,
+    init, set_context, Carrier, CloudCtx, TelemetryInit, extract_carrier_into_span, inject_carrier, prelude::*,
 };
 use std::collections::HashMap;
 
@@ -131,7 +131,7 @@ fn main() -> anyhow::Result<()> {
 
     let span = info_span!("consume");
     let _guard = span.enter();
-    extract_carrier(&headers);
+    extract_carrier_into_span(&headers, &span);
     info!("message consumed with propagated context");
 
     Ok(())
@@ -316,6 +316,6 @@ See `examples/wasm_host_demo.rs` for a runnable version.
 
 - **No logs**: ensure `RUST_LOG` includes `info` (or higher) and that the collector has a logs pipeline when using OTLP.
 - **Metrics missing**: verify the collector has a metrics pipeline and that it isn’t filtering by resource attributes (`service.*`, `deployment.environment`).
-- **Context lost**: make sure headers survive transport (case sensitivity, lower-case keys for NATS, etc.) and wrap `extract_carrier` inside a span.
+- **Context lost**: make sure headers survive transport (case sensitivity, lower-case keys for NATS, etc.) and call `extract_carrier_into_span` _before_ entering the span that should adopt the remote context.
 - **Unexpected PII**: enable `PII_REDACTION_MODE=strict` and add custom regexes for service-specific tokens.
 - **Snapshot tests**: use `greentic_telemetry::dev::test_init_for_snapshot()` and `capture_logs` to gather deterministic JSON output with a fixed timestamp.

@@ -34,11 +34,22 @@ pub fn inject_carrier(headers: &mut impl Carrier) {
 
 /// Extract span context and cloud metadata from the carrier into the current span.
 pub fn extract_carrier(headers: &impl Carrier) {
+    let span = Span::current();
+    extract_carrier_into_span(headers, &span);
+}
+
+/// Extract span context and cloud metadata from the carrier into the provided span.
+pub fn extract_carrier_into_span(headers: &impl Carrier, span: &Span) {
     let extractor = CarrierExtractor::new(headers);
     let parent_ctx = global::get_text_map_propagator(|propagator| propagator.extract(&extractor));
 
-    let span = Span::current();
-    span.set_parent(parent_ctx);
+    if let Err(err) = span.set_parent(parent_ctx) {
+        tracing::debug!(
+            target: "greentic.telemetry",
+            error = %err,
+            "extract_carrier could not apply remote parent context"
+        );
+    }
 
     let tenant = headers.get("x-tenant");
     let team = headers.get("x-team");
@@ -198,9 +209,9 @@ mod tests {
         set_context(CloudCtx::empty());
 
         let child_span = tracing::info_span!("child");
+        extract_carrier_into_span(&carrier, &child_span);
         {
             let _guard = child_span.enter();
-            extract_carrier(&carrier);
         }
 
         let child_trace_id = child_span

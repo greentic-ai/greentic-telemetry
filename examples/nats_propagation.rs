@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use greentic_telemetry::{
-    Carrier, CloudCtx, TelemetryInit, extract_carrier, init, inject_carrier, prelude::*,
+    Carrier, CloudCtx, TelemetryInit, extract_carrier_into_span, init, inject_carrier, prelude::*,
     set_context,
 };
 use tracing::info_span;
@@ -47,8 +47,8 @@ fn main() -> anyhow::Result<()> {
 
     {
         let span = info_span!("consumer");
+        extract_carrier_into_span(&headers, &span);
         let _guard = span.enter();
-        extract_carrier(&headers);
         info!(subject = "orders.created", "processed message");
     }
 

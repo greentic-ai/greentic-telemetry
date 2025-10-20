@@ -16,7 +16,7 @@ mod wasm_host;
 pub use context::{CloudCtx, set_context};
 pub use init::{TelemetryInit, init, shutdown};
 pub use metrics::{Counter, Gauge, Histogram, counter, gauge, histogram};
-pub use propagation::{Carrier, extract_carrier, inject_carrier};
+pub use propagation::{Carrier, extract_carrier, extract_carrier_into_span, inject_carrier};
 #[cfg(feature = "wasm-guest")]
 pub use wasm_guest::{
     Field as GuestField, Level as GuestLevel, log as guest_log, span_end as guest_span_end,

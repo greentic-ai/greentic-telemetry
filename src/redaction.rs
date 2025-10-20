@@ -3,17 +3,12 @@ use regex::Regex;
 use std::collections::HashSet;
 use std::sync::Mutex;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum RedactionMode {
+    #[default]
     Off,
     Strict,
     Allowlist,
-}
-
-impl Default for RedactionMode {
-    fn default() -> Self {
-        RedactionMode::Off
-    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -38,17 +33,16 @@ static DEFAULT_PATTERNS: Lazy<Vec<Regex>> = Lazy::new(|| {
 pub fn init_from_env() {
     let mode = std::env::var("PII_REDACTION_MODE")
         .ok()
-        .map(|value| value.to_ascii_lowercase())
-        .and_then(|value| match value.as_str() {
-            "off" | "none" => Some(RedactionMode::Off),
-            "strict" => Some(RedactionMode::Strict),
-            "allowlist" => Some(RedactionMode::Allowlist),
+        .map(|value| match value.to_ascii_lowercase() {
+            v if matches!(v.as_str(), "off" | "none") => RedactionMode::Off,
+            v if v == "strict" => RedactionMode::Strict,
+            v if v == "allowlist" => RedactionMode::Allowlist,
             other => {
                 tracing::warn!("unknown PII_REDACTION_MODE value: {other}, defaulting to off");
-                Some(RedactionMode::Off)
+                RedactionMode::Off
             }
         })
-        .unwrap_or(RedactionMode::Off);
+        .unwrap_or_default();
 
     let allowlist = if mode == RedactionMode::Allowlist {
         std::env::var("PII_ALLOWLIST_FIELDS")
@@ -136,10 +130,10 @@ fn apply_patterns(value: &str, redactor: &Redactor) -> String {
 
 fn warn_once(pattern: String, err: regex::Error) {
     let set = WARNED_PATTERNS.get_or_init(|| Mutex::new(HashSet::new()));
-    if let Ok(mut guard) = set.lock() {
-        if guard.insert(pattern.clone()) {
-            tracing::warn!("invalid PII_MASK_REGEXES entry '{pattern}': {err}");
-        }
+    if let Ok(mut guard) = set.lock()
+        && guard.insert(pattern.clone())
+    {
+        tracing::warn!("invalid PII_MASK_REGEXES entry '{pattern}': {err}");
     }
 }
 

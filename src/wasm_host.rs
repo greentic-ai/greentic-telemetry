@@ -1,12 +1,12 @@
-#![cfg(feature = "wasm-host")]
-
 use once_cell::sync::Lazy;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
-use tracing::{Level, Span, event, span};
+use std::sync::{
+    Mutex,
+    atomic::{AtomicU64, Ordering},
+};
+use tracing::{Level, event, span};
 
 #[derive(Clone, Copy, Debug)]
 pub enum LogLevel {
@@ -29,60 +29,30 @@ static HOST_STATE: Lazy<HostState> = Lazy::new(|| HostState {
 });
 
 thread_local! {
-    static SPAN_STACK: RefCell<Vec<(u64, tracing::span::EnteredSpan)>> = RefCell::new(Vec::new());
+    static SPAN_STACK: RefCell<Vec<(u64, tracing::span::EnteredSpan)>> = const { RefCell::new(Vec::new()) };
 }
 
 struct HostState {
     next_id: AtomicU64,
-    spans: Mutex<HashMap<u64, Span>>,
+    spans: Mutex<HashMap<u64, tracing::Span>>,
 }
 
 pub fn log(level: LogLevel, message: &str, fields: &[Field<'_>]) {
     match level {
         LogLevel::Trace => {
-            event!(
-                target: "greentic.wasm",
-                Level::TRACE,
-                runtime = "wasm",
-                message = %message,
-                guest_fields = tracing::field::display(FieldsDisplay(fields))
-            );
+            event!(target: "greentic.wasm", Level::TRACE, runtime = "wasm", message = %message, guest_fields = %FieldsDisplay(fields))
         }
         LogLevel::Debug => {
-            event!(
-                target: "greentic.wasm",
-                Level::DEBUG,
-                runtime = "wasm",
-                message = %message,
-                guest_fields = tracing::field::display(FieldsDisplay(fields))
-            );
+            event!(target: "greentic.wasm", Level::DEBUG, runtime = "wasm", message = %message, guest_fields = %FieldsDisplay(fields))
         }
         LogLevel::Info => {
-            event!(
-                target: "greentic.wasm",
-                Level::INFO,
-                runtime = "wasm",
-                message = %message,
-                guest_fields = tracing::field::display(FieldsDisplay(fields))
-            );
+            event!(target: "greentic.wasm", Level::INFO, runtime = "wasm", message = %message, guest_fields = %FieldsDisplay(fields))
         }
         LogLevel::Warn => {
-            event!(
-                target: "greentic.wasm",
-                Level::WARN,
-                runtime = "wasm",
-                message = %message,
-                guest_fields = tracing::field::display(FieldsDisplay(fields))
-            );
+            event!(target: "greentic.wasm", Level::WARN, runtime = "wasm", message = %message, guest_fields = %FieldsDisplay(fields))
         }
         LogLevel::Error => {
-            event!(
-                target: "greentic.wasm",
-                Level::ERROR,
-                runtime = "wasm",
-                message = %message,
-                guest_fields = tracing::field::display(FieldsDisplay(fields))
-            );
+            event!(target: "greentic.wasm", Level::ERROR, runtime = "wasm", message = %message, guest_fields = %FieldsDisplay(fields))
         }
     }
 }
@@ -99,7 +69,7 @@ pub fn span_start(name: &str, fields: &[Field<'_>]) -> u64 {
 
     span.record(
         "guest_fields",
-        &tracing::field::display(FieldsDisplay(fields)),
+        tracing::field::display(FieldsDisplay(fields)),
     );
 
     let id = HOST_STATE.next_id.fetch_add(1, Ordering::Relaxed);
@@ -128,7 +98,6 @@ pub fn span_end(id: u64) {
         match stack.pop() {
             Some((current_id, _guard)) if current_id == id => true,
             Some((current_id, guard)) => {
-                // unexpected ordering, push back remaining guard
                 stack.push((current_id, guard));
                 false
             }
@@ -178,7 +147,7 @@ mod tests {
         parent_span_name: Option<String>,
     }
 
-    #[derive(Debug, Default)]
+    #[derive(Debug, Default, Clone)]
     struct RecordedSpan {
         name: String,
         runtime: Option<String>,
@@ -197,7 +166,7 @@ mod tests {
 
     impl<S> Layer<S> for CaptureLayer
     where
-        S: Subscriber + for<'a> LookupSpan<'a>,
+        S: Subscriber + for<'lookup> LookupSpan<'lookup>,
     {
         fn on_new_span(
             &self,

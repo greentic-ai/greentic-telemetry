@@ -50,19 +50,19 @@ impl Histogram {
 
 pub fn counter(name: &'static str) -> Counter {
     let meter = global::meter("greentic-telemetry");
-    let inner = meter.f64_counter(name).try_init().ok();
+    let inner = Some(meter.f64_counter(name).build());
     Counter { inner }
 }
 
 pub fn gauge(name: &'static str) -> Gauge {
     let meter = global::meter("greentic-telemetry");
-    let inner = meter.f64_gauge(name).try_init().ok();
+    let inner = Some(meter.f64_gauge(name).build());
     Gauge { inner }
 }
 
 pub fn histogram(name: &'static str) -> Histogram {
     let meter = global::meter("greentic-telemetry");
-    let inner = meter.f64_histogram(name).try_init().ok();
+    let inner = Some(meter.f64_histogram(name).build());
     Histogram { inner }
 }
 

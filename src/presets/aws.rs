@@ -4,17 +4,16 @@ use super::{PresetConfig, parse_headers_from_env};
 use crate::export::ExportMode;
 
 pub fn config() -> Result<PresetConfig> {
-    let mut preset = PresetConfig::default();
-    preset.export_mode = Some(ExportMode::OtlpGrpc);
+    let endpoint = std::env::var("OTLP_ENDPOINT")
+        .ok()
+        .filter(|ep| !ep.is_empty())
+        .or_else(|| Some(String::from("http://aws-otel-collector:4317")));
 
-    let endpoint = std::env::var("OTLP_ENDPOINT").ok();
-    preset.otlp_endpoint = match endpoint {
-        Some(ep) if !ep.is_empty() => Some(ep),
-        _ => Some(String::from("http://aws-otel-collector:4317")),
-    };
+    let headers = parse_headers_from_env(std::env::var("OTLP_HEADERS").ok())?;
 
-    // Preserve user provided headers.
-    preset.otlp_headers = parse_headers_from_env(std::env::var("OTLP_HEADERS").ok())?;
-
-    Ok(preset)
+    Ok(PresetConfig {
+        export_mode: Some(ExportMode::OtlpGrpc),
+        otlp_endpoint: endpoint,
+        otlp_headers: headers,
+    })
 }

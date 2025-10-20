@@ -19,19 +19,17 @@ use std::io::{self, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(any(feature = "otlp-grpc", feature = "otlp-http"))]
-use opentelemetry::KeyValue;
-use opentelemetry::global;
+use opentelemetry::{global, KeyValue};
 use opentelemetry::trace::TracerProvider as _;
 #[cfg(any(feature = "otlp-grpc", feature = "otlp-http"))]
-use opentelemetry_otlp::{self, WithExportConfig};
-use opentelemetry_sdk::propagation::TraceContextPropagator;
-use opentelemetry_sdk::trace::TracerProvider;
+use opentelemetry_otlp::{MetricExporter, SpanExporter, WithExportConfig};
+#[cfg(feature = "otlp-grpc")]
+use opentelemetry_otlp::WithTonicConfig;
+use opentelemetry_sdk::{propagation::TraceContextPropagator, resource::Resource};
 #[cfg(any(feature = "otlp-grpc", feature = "otlp-http"))]
-use opentelemetry_sdk::{
-    resource::Resource,
-    runtime::Tokio,
-    trace::{self, BatchSpanProcessor},
-};
+use opentelemetry_sdk::metrics::SdkMeterProvider;
+#[cfg(any(feature = "otlp-grpc", feature = "otlp-http"))]
+use opentelemetry_sdk::trace::SdkTracerProvider;
 #[cfg(feature = "otlp-grpc")]
 use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue, MetadataMap};
 
@@ -47,6 +45,10 @@ pub(crate) static TELEMETRY_STATE: OnceCell<Arc<SharedState>> = OnceCell::new();
 
 #[cfg(any(feature = "otlp-grpc", feature = "otlp-http"))]
 static OTLP_ACTIVE: OnceCell<()> = OnceCell::new();
+#[cfg(any(feature = "otlp-grpc", feature = "otlp-http"))]
+static TRACE_PROVIDER: OnceCell<SdkTracerProvider> = OnceCell::new();
+#[cfg(any(feature = "otlp-grpc", feature = "otlp-http"))]
+static METER_PROVIDER: OnceCell<SdkMeterProvider> = OnceCell::new();
 
 pub(crate) struct SharedState {
     pub service_name: &'static str,
@@ -263,8 +265,11 @@ fn env_filter_from_env() -> Result<EnvFilter> {
 pub fn shutdown() {
     #[cfg(any(feature = "otlp-grpc", feature = "otlp-http"))]
     {
-        if OTLP_ACTIVE.get().is_some() {
-            global::shutdown_tracer_provider();
+        if let Some(provider) = TRACE_PROVIDER.get() {
+            let _ = provider.shutdown();
+        }
+        if let Some(provider) = METER_PROVIDER.get() {
+            let _ = provider.shutdown();
         }
     }
 }
@@ -276,73 +281,22 @@ fn install_otlp(
     config: &ExportConfig,
 ) -> Result<(), anyhow::Error> {
     let sampler = config.sampling.into_sampler();
-    let resource = Resource::new(vec![
-        KeyValue::new("service.name", state.service_name.to_string()),
-        KeyValue::new("service.version", state.service_version.to_string()),
-        KeyValue::new("deployment.environment", state.deployment_env.to_string()),
-    ]);
-
-    let trace_config = trace::Config::default()
-        .with_sampler(sampler)
-        .with_resource(resource.clone());
+    let resource = build_resource(state);
 
     #[cfg(any(feature = "otlp-grpc", feature = "otlp-http"))]
     install_otlp_metrics(&resource, config)?;
 
-    let exporter = match config.mode {
-        ExportMode::OtlpGrpc => {
-            #[cfg(feature = "otlp-grpc")]
-            {
-                let mut builder = opentelemetry_otlp::new_exporter().tonic();
-                if let Some(endpoint) = &config.endpoint {
-                    builder = builder.with_endpoint(endpoint.clone());
-                }
-                if !config.headers.is_empty() {
-                    let metadata = build_metadata_map(&config.headers)?;
-                    builder = builder.with_metadata(metadata);
-                }
-                builder
-                    .build_span_exporter()
-                    .context("failed to build gRPC OTLP exporter")?
-            }
-            #[cfg(not(feature = "otlp-grpc"))]
-            {
-                return Err(anyhow!("otlp-grpc feature not enabled"));
-            }
-        }
-        ExportMode::OtlpHttp => {
-            #[cfg(feature = "otlp-http")]
-            {
-                let mut builder = opentelemetry_otlp::new_exporter().http();
-                if let Some(endpoint) = &config.endpoint {
-                    builder = builder.with_endpoint(endpoint.clone());
-                }
-                if !config.headers.is_empty() {
-                    builder = builder.with_headers(config.headers.clone());
-                }
-                builder
-                    .build_span_exporter()
-                    .context("failed to build HTTP OTLP exporter")?
-            }
-            #[cfg(not(feature = "otlp-http"))]
-            {
-                return Err(anyhow!("otlp-http feature not enabled"));
-            }
-        }
-        ExportMode::JsonStdout => {
-            return Err(anyhow!("json exporter cannot configure OTLP layer"));
-        }
-    };
+    let span_exporter = build_span_exporter(config)?;
 
-    let processor = BatchSpanProcessor::builder(exporter, Tokio).build();
-
-    let provider = TracerProvider::builder()
-        .with_config(trace_config)
-        .with_span_processor(processor)
+    let provider = SdkTracerProvider::builder()
+        .with_batch_exporter(span_exporter)
+        .with_sampler(sampler)
+        .with_resource(resource.clone())
         .build();
 
     let tracer = provider.tracer(state.service_name);
-    global::set_tracer_provider(provider);
+    global::set_tracer_provider(provider.clone());
+    let _ = TRACE_PROVIDER.set(provider);
 
     let subscriber = Registry::default()
         .with(filter.clone())
@@ -358,22 +312,25 @@ fn install_otlp_metrics(resource: &Resource, config: &ExportConfig) -> Result<()
         ExportMode::OtlpGrpc => {
             #[cfg(feature = "otlp-grpc")]
             {
-                let mut exporter = opentelemetry_otlp::new_exporter().tonic();
+                let mut builder = MetricExporter::builder().with_tonic();
                 if let Some(endpoint) = &config.endpoint {
-                    exporter = exporter.with_endpoint(endpoint.clone());
+                    builder = builder.with_endpoint(endpoint.clone());
                 }
                 if !config.headers.is_empty() {
                     let metadata = build_metadata_map(&config.headers)?;
-                    exporter = exporter.with_metadata(metadata);
+                    builder = builder.with_metadata(metadata);
                 }
-
-                opentelemetry_otlp::new_pipeline()
-                    .metrics(Tokio)
-                    .with_exporter(exporter)
-                    .with_resource(resource.clone())
+                let exporter = builder
                     .build()
-                    .map(|_| ())
-                    .map_err(|err| anyhow!("failed to install OTLP metrics pipeline: {err}"))
+                    .context("failed to build gRPC OTLP metrics exporter")?;
+
+                let provider = SdkMeterProvider::builder()
+                    .with_periodic_exporter(exporter)
+                    .with_resource(resource.clone())
+                    .build();
+                global::set_meter_provider(provider.clone());
+                let _ = METER_PROVIDER.set(provider);
+                Ok(())
             }
             #[cfg(not(feature = "otlp-grpc"))]
             {
@@ -383,21 +340,24 @@ fn install_otlp_metrics(resource: &Resource, config: &ExportConfig) -> Result<()
         ExportMode::OtlpHttp => {
             #[cfg(feature = "otlp-http")]
             {
-                let mut exporter = opentelemetry_otlp::new_exporter().http();
+                let mut builder = MetricExporter::builder().with_http();
                 if let Some(endpoint) = &config.endpoint {
-                    exporter = exporter.with_endpoint(endpoint.clone());
+                    builder = builder.with_endpoint(endpoint.clone());
                 }
                 if !config.headers.is_empty() {
-                    exporter = exporter.with_headers(config.headers.clone());
+                    builder = builder.with_headers(config.headers.clone());
                 }
-
-                opentelemetry_otlp::new_pipeline()
-                    .metrics(Tokio)
-                    .with_exporter(exporter)
-                    .with_resource(resource.clone())
+                let exporter = builder
                     .build()
-                    .map(|_| ())
-                    .map_err(|err| anyhow!("failed to install OTLP metrics pipeline: {err}"))
+                    .context("failed to build HTTP OTLP metrics exporter")?;
+
+                let provider = SdkMeterProvider::builder()
+                    .with_periodic_exporter(exporter)
+                    .with_resource(resource.clone())
+                    .build();
+                global::set_meter_provider(provider.clone());
+                let _ = METER_PROVIDER.set(provider);
+                Ok(())
             }
             #[cfg(not(feature = "otlp-http"))]
             {
@@ -405,6 +365,72 @@ fn install_otlp_metrics(resource: &Resource, config: &ExportConfig) -> Result<()
             }
         }
         ExportMode::JsonStdout => Ok(()),
+    }
+}
+
+#[cfg(any(feature = "otlp-grpc", feature = "otlp-http"))]
+fn build_resource(state: &SharedState) -> Resource {
+    let mut attributes = vec![
+        KeyValue::new("service.name", state.service_name.to_string()),
+        KeyValue::new("service.version", state.service_version.to_string()),
+        KeyValue::new(
+            "deployment.environment",
+            state.deployment_env.to_string(),
+        ),
+    ];
+
+    for (key, value) in state.context_snapshot() {
+        if let Some(value) = value {
+            attributes.push(KeyValue::new(key, value));
+        }
+    }
+
+    Resource::builder().with_attributes(attributes).build()
+}
+
+#[cfg(any(feature = "otlp-grpc", feature = "otlp-http"))]
+fn build_span_exporter(config: &ExportConfig) -> Result<SpanExporter> {
+    match config.mode {
+        ExportMode::OtlpGrpc => {
+            #[cfg(feature = "otlp-grpc")]
+            {
+                let mut builder = SpanExporter::builder().with_tonic();
+                if let Some(endpoint) = &config.endpoint {
+                    builder = builder.with_endpoint(endpoint.clone());
+                }
+                if !config.headers.is_empty() {
+                    let metadata = build_metadata_map(&config.headers)?;
+                    builder = builder.with_metadata(metadata);
+                }
+                builder
+                    .build()
+                    .context("failed to build gRPC OTLP span exporter")
+            }
+            #[cfg(not(feature = "otlp-grpc"))]
+            {
+                unreachable!()
+            }
+        }
+        ExportMode::OtlpHttp => {
+            #[cfg(feature = "otlp-http")]
+            {
+                let mut builder = SpanExporter::builder().with_http();
+                if let Some(endpoint) = &config.endpoint {
+                    builder = builder.with_endpoint(endpoint.clone());
+                }
+                if !config.headers.is_empty() {
+                    builder = builder.with_headers(config.headers.clone());
+                }
+                builder
+                    .build()
+                    .context("failed to build HTTP OTLP span exporter")
+            }
+            #[cfg(not(feature = "otlp-http"))]
+            {
+                unreachable!()
+            }
+        }
+        ExportMode::JsonStdout => Err(anyhow!("json exporter cannot configure OTLP layer")),
     }
 }
 
@@ -425,9 +451,12 @@ fn build_metadata_map(headers: &HashMap<String, String>) -> Result<MetadataMap> 
 
 #[cfg(feature = "json-stdout")]
 fn install_json(filter: &EnvFilter, state: &Arc<SharedState>) -> Result<(), anyhow::Error> {
-    let provider = TracerProvider::builder().build();
+    let provider = SdkTracerProvider::builder()
+        .with_resource(build_resource(state))
+        .build();
     let tracer = provider.tracer(state.service_name);
-    global::set_tracer_provider(provider);
+    global::set_tracer_provider(provider.clone());
+    let _ = TRACE_PROVIDER.set(provider);
 
     let subscriber = Registry::default()
         .with(filter.clone())
@@ -439,9 +468,12 @@ fn install_json(filter: &EnvFilter, state: &Arc<SharedState>) -> Result<(), anyh
 
 #[cfg(not(feature = "json-stdout"))]
 fn install_json(filter: &EnvFilter, state: &Arc<SharedState>) -> Result<(), anyhow::Error> {
-    let provider = TracerProvider::builder().build();
+    let provider = SdkTracerProvider::builder()
+        .with_resource(build_resource(state))
+        .build();
     let tracer = provider.tracer(state.service_name);
-    global::set_tracer_provider(provider);
+    global::set_tracer_provider(provider.clone());
+    let _ = TRACE_PROVIDER.set(provider);
 
     let subscriber = Registry::default()
         .with(filter.clone())
