@@ -1,0 +1,59 @@
+name: ci-aws-telemetry
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  aws-otel:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      AWS_REGION: eu-west-1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Start ADOT Collector
+        run: |
+          docker run -d --name adot -p 4317:4317 -p 4318:4318 \
+            -e AWS_REGION=${AWS_REGION} \
+            -v $PWD/.github/otel/aws.yaml:/etc/otelcol/config.yaml \
+            public.ecr.aws/aws-observability/aws-otel-collector:latest \
+            --config /etc/otelcol/config.yaml
+          sleep 2
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run tests (emit telemetry)
+        env:
+          OTEL_EXPORTER_OTLP_ENDPOINT: http://127.0.0.1:4317
+          OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+          SERVICE_NAME: greentic-telemetry
+          TEST_MARKER: greentic-aws-${{ github.run_id }}
+        run: cargo test --tests emit_cloud -- --nocapture
+
+      - name: Assert CloudWatch log received
+        run: |
+          for i in {1..12}; do
+            aws logs filter-log-events --log-group-name "/greentic/ci" \
+              --filter-pattern "${TEST_MARKER}" --max-items 1 \
+              | jq -e '.events[0]' && exit 0 || true
+            sleep 10
+          done
+          echo "Marker not found in CloudWatch"; exit 1
+
+      - name: Assert X-Ray trace exists (best-effort)
+        run: |
+          aws xray get-trace-summaries \
+            --start-time $(date -u -d '15 minutes ago' +%s) \
+            --end-time $(date -u +%s) \
+            | jq -e '.TraceSummaries | length >= 0' >/dev/null

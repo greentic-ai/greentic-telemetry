@@ -1,0 +1,59 @@
+name: ci-azure-telemetry
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  azure-otel:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (federated)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Start Otel Collector
+        env:
+          AZURE_APPINSIGHTS_INSTRUMENTATION_KEY: ${{ secrets.AZURE_APPINSIGHTS_INSTRUMENTATION_KEY }}
+        run: |
+          docker run -d --name otel-az -p 4317:4317 -p 4318:4318 \
+            -e AZURE_APPINSIGHTS_INSTRUMENTATION_KEY=${AZURE_APPINSIGHTS_INSTRUMENTATION_KEY} \
+            -v $PWD/.github/otel/azure.yaml:/etc/otelcol/config.yaml \
+            otel/opentelemetry-collector:latest \
+            --config /etc/otelcol/config.yaml
+          sleep 2
+
+      - name: Install Azure CLI ext
+        run: az extension add -n application-insights
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run tests (emit telemetry)
+        env:
+          OTEL_EXPORTER_OTLP_ENDPOINT: http://127.0.0.1:4317
+          OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+          SERVICE_NAME: greentic-telemetry
+          TEST_MARKER: greentic-az-${{ github.run_id }}
+        run: cargo test --tests emit_cloud -- --nocapture
+
+      - name: Assert traces via KQL
+        env:
+          AZURE_APPINSIGHTS_APPID: ${{ secrets.AZURE_APPINSIGHTS_APPID }}
+        run: |
+          for i in {1..12}; do
+            az monitor app-insights query \
+              --app "$AZURE_APPINSIGHTS_APPID" \
+              --analytics-query "traces | where tostring(message) has '${TEST_MARKER}' | take 1" \
+              --offset 15m | jq -e '.tables[0].rows[0]' && exit 0 || true
+            sleep 10
+          done
+          echo "Marker not found in Azure traces"; exit 1

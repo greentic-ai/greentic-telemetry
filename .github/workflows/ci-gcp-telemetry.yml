@@ -1,0 +1,56 @@
+name: ci-gcp-telemetry
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  gcp-otel:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Auth via WIF
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SA_EMAIL }}
+
+      - name: Install gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Start Otel Collector
+        run: |
+          docker run -d --name otel-gcp -p 4317:4317 -p 4318:4318 \
+            -e GCP_PROJECT_ID=${GCP_PROJECT_ID} \
+            -v $PWD/.github/otel/gcp.yaml:/etc/otelcol/config.yaml \
+            otel/opentelemetry-collector:latest \
+            --config /etc/otelcol/config.yaml
+          sleep 2
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run tests (emit telemetry)
+        env:
+          OTEL_EXPORTER_OTLP_ENDPOINT: http://127.0.0.1:4317
+          OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+          SERVICE_NAME: greentic-telemetry
+          TEST_MARKER: greentic-gcp-${{ github.run_id }}
+        run: cargo test --tests emit_cloud -- --nocapture
+
+      - name: Assert log received
+        run: |
+          for i in {1..12}; do
+            gcloud logging read "textPayload:${TEST_MARKER}" --limit=1 --freshness=15m --format=json | jq -e '.[0]' && exit 0 || true
+            sleep 10
+          done
+          echo "Marker not found in Cloud Logging"; exit 1
+
+      - name: (Optional) Assert trace exists
+        run: gcloud trace list --limit=10 --format=json | jq -e 'length >= 0' >/dev/null

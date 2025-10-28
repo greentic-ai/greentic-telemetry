@@ -1,5 +1,8 @@
 name: CI
 
+permissions:
+  contents: write
+
 on:
   push:
   pull_request:
@@ -40,6 +43,6 @@ jobs:
           release_name: greentic-telemetry v${{ steps.metadata.outputs.crate_version }}
           body: |
             Automated release for greentic-telemetry v${{ steps.metadata.outputs.crate_version }}.
-          target_commitish: ${{ github.sha }}
+          commitish: ${{ github.sha }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -56,11 +56,41 @@ When OTLP configuration fails, the crate logs a warning and keeps emitting JSON 
 ### Runnable examples
 
 ```bash
-cargo run --example stdout          # JSON logs to stdout
-cargo run --example nats_propagation
-cargo run --example wasm_host_demo
-cargo run --example otlp_demo       # requires OTLP endpoint
+cargo run --features dev --example demo   # pretty stdout + rolling file logs
 ```
+
+## Quick dev logs (Elastic + Kibana)
+
+Write logs locally (pretty + file) with the `dev` feature:
+
+```bash
+cargo run --features dev --example demo
+```
+
+Start the dev log stack:
+
+```bash
+make dev-logs-elastic
+# Open Kibana → http://localhost:5601 → Discover
+# If asked for an index, use filebeat-* (or search globally)
+```
+
+Verify the stack:
+
+```bash
+# ensure logs exist locally
+ls .dev-logs
+
+# check docker containers are healthy
+docker compose -f dev/docker-compose.elastic.yml ps
+docker compose -f dev/docker-compose.elastic.yml logs filebeat
+
+# confirm Elasticsearch ingested documents
+curl -s http://localhost:9200/_cat/indices?v | grep filebeat
+curl -s http://localhost:9200/filebeat-*/_search?pretty | head
+```
+
+> Kibana may warn that it cannot reach the Elastic package registry. This stack only uses Filebeat and Elasticsearch, so the message is safe to ignore. Create a data view with pattern `filebeat-*` (Discover → Create data view) and you should see the demo logs.
 
 ## Context Propagation
 
@@ -319,3 +349,41 @@ See `examples/wasm_host_demo.rs` for a runnable version.
 - **Context lost**: make sure headers survive transport (case sensitivity, lower-case keys for NATS, etc.) and call `extract_carrier_into_span` _before_ entering the span that should adopt the remote context.
 - **Unexpected PII**: enable `PII_REDACTION_MODE=strict` and add custom regexes for service-specific tokens.
 - **Snapshot tests**: use `greentic_telemetry::dev::test_init_for_snapshot()` and `capture_logs` to gather deterministic JSON output with a fixed timestamp.
+
+## Dev logs: Elastic + Kibana
+Pretty logs and a rotating JSON file are produced under `--features dev`.
+Start the dev stack:
+```bash
+cargo run --features dev --example demo
+make dev-logs-elastic
+# Kibana → http://localhost:5601 (Discover → search logs)
+```
+
+Cloud CI telemetry tests
+
+We ship OTLP to a per-provider OpenTelemetry Collector in CI using GitHub OIDC (no static keys):
+
+- AWS: CloudWatch Logs + X-Ray
+- GCP: Cloud Logging + Cloud Trace
+- Azure: App Insights
+
+See `.github/workflows/ci-*.yml` and `.github/otel/*.yaml`.
+
+---
+
+## How to use (quick recap)
+
+- **Dev logs**  
+  ```bash
+  cargo run --features dev --example demo
+  make dev-logs-elastic
+  # http://localhost:5601
+  ```
+
+- **CI (cloud)**  
+  Push to `main` (or run `workflow_dispatch`) after configuring the cloud-side OIDC/federated credentials + repo secrets listed above. Workflows:
+  - `ci-aws-telemetry.yml`
+  - `ci-gcp-telemetry.yml`
+  - `ci-azure-telemetry.yml`
+
+Want an OpenSearch drop-in (fully open-source) instead of Elastic? I can provide a parallel `docker-compose.opensearch.yml` with Dashboards + Filebeat in the same layout.

@@ -1,0 +1,23 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+      http:
+
+processors:
+  batch: {}
+
+exporters:
+  googlecloud:
+    project: ${GCP_PROJECT_ID}
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [googlecloud]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [googlecloud]

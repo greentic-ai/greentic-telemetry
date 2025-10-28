@@ -1,0 +1,21 @@
+filebeat.inputs:
+  - type: filestream
+    id: greentic-dev-logs
+    paths: ["/var/log/greentic/*.log"]
+    parsers:
+      - ndjson:
+          when.decode_failure: discard
+
+output.elasticsearch:
+  hosts: ["http://elasticsearch:9200"]
+
+setup.template.name: "greentic-dev"
+setup.template.pattern: "greentic-dev-*"
+setup.ilm.enabled: false
+
+processors:
+  - add_fields:
+      target: 'greentic'
+      fields:
+        env: 'dev'
+        app: 'greentic-telemetry'
