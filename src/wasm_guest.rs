@@ -1,5 +1,3 @@
-#![cfg(feature = "wasm-guest")]
-
 #[derive(Clone, Copy, Debug)]
 pub enum Level {
     Trace,
@@ -16,7 +14,7 @@ pub struct Field<'a> {
 }
 
 pub fn log(level: Level, message: &str, fields: &[Field<'_>]) {
-    #[cfg(all(target_arch = "wasm32"))]
+    #[cfg(target_arch = "wasm32")]
     {
         host::log(level, message, fields);
         return;
@@ -29,7 +27,7 @@ pub fn log(level: Level, message: &str, fields: &[Field<'_>]) {
 }
 
 pub fn span_start(name: &str, fields: &[Field<'_>]) -> u64 {
-    #[cfg(all(target_arch = "wasm32"))]
+    #[cfg(target_arch = "wasm32")]
     {
         return host::span_start(name, fields);
     }
@@ -42,7 +40,7 @@ pub fn span_start(name: &str, fields: &[Field<'_>]) -> u64 {
 }
 
 pub fn span_end(id: u64) {
-    #[cfg(all(target_arch = "wasm32"))]
+    #[cfg(target_arch = "wasm32")]
     {
         host::span_end(id);
         return;
@@ -54,7 +52,7 @@ pub fn span_end(id: u64) {
     }
 }
 
-#[cfg(all(target_arch = "wasm32"))]
+#[cfg(target_arch = "wasm32")]
 mod host {
     use super::{Field, Level};
 

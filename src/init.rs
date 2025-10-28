@@ -3,11 +3,14 @@ use anyhow::{Context, Result, anyhow};
 use once_cell::sync::OnceCell;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
-use tracing::{Dispatch, Event, Subscriber, dispatcher};
+use tracing::{Dispatch, dispatcher};
+#[cfg(feature = "json-stdout")]
+use tracing::{Event, Subscriber};
 use tracing_log::LogTracer;
+use tracing_subscriber::{EnvFilter, Registry, layer::SubscriberExt};
+#[cfg(feature = "json-stdout")]
 use tracing_subscriber::{
-    EnvFilter, Registry,
-    layer::{Context as LayerContext, Layer, SubscriberExt},
+    layer::{Context as LayerContext, Layer},
     registry::LookupSpan,
 };
 
@@ -18,18 +21,18 @@ use std::io::{self, Write};
 #[cfg(feature = "json-stdout")]
 use std::time::{SystemTime, UNIX_EPOCH};
 
-#[cfg(any(feature = "otlp-grpc", feature = "otlp-http"))]
-use opentelemetry::{global, KeyValue};
 use opentelemetry::trace::TracerProvider as _;
-#[cfg(any(feature = "otlp-grpc", feature = "otlp-http"))]
-use opentelemetry_otlp::{MetricExporter, SpanExporter, WithExportConfig};
+use opentelemetry::{KeyValue, global};
+#[cfg(feature = "otlp-http")]
+use opentelemetry_otlp::WithHttpConfig;
 #[cfg(feature = "otlp-grpc")]
 use opentelemetry_otlp::WithTonicConfig;
-use opentelemetry_sdk::{propagation::TraceContextPropagator, resource::Resource};
+#[cfg(any(feature = "otlp-grpc", feature = "otlp-http"))]
+use opentelemetry_otlp::{MetricExporter, SpanExporter, WithExportConfig};
 #[cfg(any(feature = "otlp-grpc", feature = "otlp-http"))]
 use opentelemetry_sdk::metrics::SdkMeterProvider;
-#[cfg(any(feature = "otlp-grpc", feature = "otlp-http"))]
 use opentelemetry_sdk::trace::SdkTracerProvider;
+use opentelemetry_sdk::{propagation::TraceContextPropagator, resource::Resource};
 #[cfg(feature = "otlp-grpc")]
 use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue, MetadataMap};
 
@@ -45,7 +48,6 @@ pub(crate) static TELEMETRY_STATE: OnceCell<Arc<SharedState>> = OnceCell::new();
 
 #[cfg(any(feature = "otlp-grpc", feature = "otlp-http"))]
 static OTLP_ACTIVE: OnceCell<()> = OnceCell::new();
-#[cfg(any(feature = "otlp-grpc", feature = "otlp-http"))]
 static TRACE_PROVIDER: OnceCell<SdkTracerProvider> = OnceCell::new();
 #[cfg(any(feature = "otlp-grpc", feature = "otlp-http"))]
 static METER_PROVIDER: OnceCell<SdkMeterProvider> = OnceCell::new();
@@ -368,15 +370,11 @@ fn install_otlp_metrics(resource: &Resource, config: &ExportConfig) -> Result<()
     }
 }
 
-#[cfg(any(feature = "otlp-grpc", feature = "otlp-http"))]
 fn build_resource(state: &SharedState) -> Resource {
     let mut attributes = vec![
         KeyValue::new("service.name", state.service_name.to_string()),
         KeyValue::new("service.version", state.service_version.to_string()),
-        KeyValue::new(
-            "deployment.environment",
-            state.deployment_env.to_string(),
-        ),
+        KeyValue::new("deployment.environment", state.deployment_env.to_string()),
     ];
 
     for (key, value) in state.context_snapshot() {

@@ -13,11 +13,19 @@ pub enum ExportMode {
 }
 
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(
+    not(any(feature = "otlp-grpc", feature = "otlp-http")),
+    allow(dead_code)
+)]
 pub enum Sampling {
     Parent,
     TraceIdRatio(f64),
 }
 
+#[cfg_attr(
+    not(any(feature = "otlp-grpc", feature = "otlp-http")),
+    allow(dead_code)
+)]
 pub struct ExportConfig {
     pub mode: ExportMode,
     pub endpoint: Option<String>,

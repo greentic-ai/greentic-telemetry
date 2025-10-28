@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static CAPTURE_ENABLED: AtomicBool = AtomicBool::new(false);
 static CAPTURED_LOGS: Lazy<Mutex<Vec<String>>> = Lazy::new(|| Mutex::new(Vec::new()));
+#[cfg(feature = "json-stdout")]
 static FIXED_TIME: OnceCell<String> = OnceCell::new();
 static SNAPSHOT_INIT: OnceCell<()> = OnceCell::new();
 
@@ -67,6 +68,7 @@ where
     logs
 }
 
+#[cfg(feature = "json-stdout")]
 pub(crate) fn maybe_capture(bytes: &[u8]) {
     if !CAPTURE_ENABLED.load(Ordering::SeqCst) {
         return;
@@ -77,6 +79,7 @@ pub(crate) fn maybe_capture(bytes: &[u8]) {
     }
 }
 
+#[cfg(feature = "json-stdout")]
 pub(crate) fn fixed_timestamp() -> Option<String> {
     if let Some(value) = FIXED_TIME.get() {
         return Some(value.clone());
