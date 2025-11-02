@@ -1,12 +1,17 @@
 use anyhow::Result;
 use once_cell::sync::OnceCell;
+#[cfg(feature = "otlp")]
 use opentelemetry::KeyValue;
-use opentelemetry::global;
-use opentelemetry_sdk::{Resource, trace as sdktrace};
+#[cfg(feature = "otlp")]
+use opentelemetry_sdk::trace::SdkTracerProvider;
+#[cfg(feature = "otlp")]
+use opentelemetry_sdk::Resource;
+#[cfg(feature = "otlp")]
+use std::time::Duration;
 #[cfg(feature = "dev")]
 use tracing_appender::rolling;
 #[cfg(any(feature = "dev", feature = "prod-json"))]
-use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 static INITED: OnceCell<()> = OnceCell::new();
 
@@ -62,20 +67,43 @@ pub fn init_telemetry(cfg: TelemetryConfig) -> Result<()> {
 
     #[cfg(feature = "dev-console")]
     {
-        console_subscriber::init();
+        if std::env::var_os("TOKIO_CONSOLE").is_some() {
+            if std::panic::catch_unwind(|| console_subscriber::init()).is_err() {
+                tracing::warn!(
+                    "dev-console feature enabled but tokio_unstable not set; skipping console subscriber init"
+                );
+            }
+        }
     }
 
     // ----- tracing (OTLP) -----
     // Respect OTEL_* env; default to no-op if endpoint not set.
-    if std::env::var_os("OTEL_EXPORTER_OTLP_ENDPOINT").is_some() {
-        let resource = Resource::new([KeyValue::new("service.name", cfg.service_name.clone())]);
+    #[cfg(feature = "otlp")]
+    {
+        use opentelemetry::global;
+        use opentelemetry_otlp::{SpanExporter, WithExportConfig};
 
-        let tracer = opentelemetry_otlp::new_pipeline()
-            .tracing()
-            .with_exporter(opentelemetry_otlp::new_exporter().tonic())
-            .with_trace_config(sdktrace::Config::default().with_resource(resource))
-            .install_batch(opentelemetry_sdk::runtime::Tokio)?;
-        let _ = tracer; // global registered by install_batch
+        if let Some(endpoint) = std::env::var_os("OTEL_EXPORTER_OTLP_ENDPOINT") {
+            let endpoint = endpoint.to_string_lossy().into_owned();
+            let exporter_builder = SpanExporter::builder()
+                .with_tonic()
+                .with_endpoint(endpoint)
+                .with_timeout(Duration::from_secs(3));
+
+            let exporter = exporter_builder.build()?;
+
+            let resource = Resource::builder_empty()
+                .with_attributes([KeyValue::new("service.name", cfg.service_name.clone())])
+                .build();
+
+            let provider = SdkTracerProvider::builder()
+                .with_resource(resource)
+                .with_batch_exporter(exporter)
+                .build();
+
+            crate::otlp::register_provider(provider.clone());
+            global::set_tracer_provider(provider);
+        }
     }
 
     let _ = INITED.set(());
@@ -83,5 +111,6 @@ pub fn init_telemetry(cfg: TelemetryConfig) -> Result<()> {
 }
 
 pub fn shutdown() {
-    let _ = global::shutdown_tracer_provider();
+    #[cfg(feature = "otlp")]
+    crate::otlp::shutdown();
 }

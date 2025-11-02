@@ -1,7 +1,7 @@
 [package]
 name = "greentic-telemetry"
-version = "0.1.2"
-edition = "2024"
+version = "0.1.3"
+edition = "2021"
 license = "MIT"
 repository = "https://github.com/greentic-ai/greentic-telemetry"
 homepage = "https://greentic.ai"
@@ -15,10 +15,12 @@ categories = ["development-tools","visualization","wasm"]
 all-features = true
 
 [features]
-default = []
+default = ["otlp"]
 dev = []            # pretty stdout + rolling file logs
 prod-json = []      # JSON stdout for prod
 dev-console = ["console-subscriber"]    # optional tokio-console
+otlp = []
+elastic = []
 
 [dependencies]
 anyhow = "1"
@@ -28,11 +30,15 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"]
 tracing-error = "0.2"
 tracing-appender = "0.2"
 atty = "0.2"
-opentelemetry = { version = "0.26", features = ["trace", "metrics"] }
-opentelemetry-otlp = { version = "0.26", features = ["grpc-tonic", "http-proto", "metrics"] }
-opentelemetry_sdk = { version = "0.26", features = ["rt-tokio", "metrics"] }
+opentelemetry = { version = "0.31", features = ["trace", "metrics"] }
+opentelemetry-otlp = { version = "0.31", features = ["grpc-tonic", "http-proto", "metrics"] }
+opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "metrics"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 console-subscriber = { version = "0.4", optional = true }
+serde = { version = "1", features = ["derive"] }
+thiserror = "1"
+tracing-opentelemetry = "0.32"
+greentic-types = { version = "0.1.6", path = "../greentic-types" }
 
 [dev-dependencies]
 uuid = { version = "1", features = ["v4"] }

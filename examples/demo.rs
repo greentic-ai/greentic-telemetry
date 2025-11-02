@@ -1,5 +1,5 @@
-use greentic_telemetry::{TelemetryConfig, init_telemetry, shutdown};
-use tracing::{Level, info, span};
+use greentic_telemetry::{init_telemetry, shutdown, TelemetryConfig};
+use tracing::{info, span, Level};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -18,7 +18,7 @@ async fn main() -> anyhow::Result<()> {
     let counter = meter
         .u64_counter("demo_requests")
         .with_description("demo counter")
-        .init();
+        .build();
     counter.add(1, &[]);
 
     shutdown();
