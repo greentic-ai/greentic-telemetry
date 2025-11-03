@@ -1,4 +1,4 @@
-use crate::ctx::TelemetryCtx;
+use crate::context::TelemetryCtx;
 use std::sync::{Arc, Mutex};
 use tracing::Subscriber;
 use tracing_subscriber::{
@@ -32,15 +32,17 @@ where
     S: Subscriber + for<'lookup> LookupSpan<'lookup>,
 {
     fn on_close(&self, id: tracing::span::Id, ctx: Context<'_, S>) {
-        if let Some(span) = ctx.span(&id) {
-            if let Some(tctx) = span.extensions().get::<TelemetryCtx>() {
-                if let Ok(mut guard) = self.spans.lock() {
-                    guard.push(RecordedSpan {
-                        name: span.metadata().name(),
-                        ctx: tctx.clone(),
-                    });
-                }
-            }
+        let Some(span) = ctx.span(&id) else {
+            return;
+        };
+        let Some(tctx) = span.extensions().get::<TelemetryCtx>().cloned() else {
+            return;
+        };
+        if let Ok(mut guard) = self.spans.lock() {
+            guard.push(RecordedSpan {
+                name: span.metadata().name(),
+                ctx: tctx,
+            });
         }
     }
 }

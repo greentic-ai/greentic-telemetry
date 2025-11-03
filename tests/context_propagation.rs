@@ -1,6 +1,6 @@
 use greentic_telemetry::{CtxLayer, TelemetryCtx};
-use tracing::{info, span, Level};
-use tracing_subscriber::{layer::SubscriberExt, Registry};
+use tracing::{Level, info, span};
+use tracing_subscriber::{Registry, layer::SubscriberExt};
 
 #[test]
 fn ctx_is_recorded_on_spans() {
@@ -15,7 +15,7 @@ fn ctx_is_recorded_on_spans() {
 
     let (capture_layer, store) = greentic_telemetry::testutil::span_recorder();
     let subscriber = Registry::default()
-        .with(CtxLayer::new(build_ctx))
+        .with(CtxLayer(|| Some(build_ctx())))
         .with(capture_layer);
 
     let _guard = tracing::subscriber::set_default(subscriber);
@@ -23,11 +23,11 @@ fn ctx_is_recorded_on_spans() {
     let root = span!(
         Level::INFO,
         "node_execute",
-        "greentic.tenant" = tracing::field::Empty,
-        "greentic.session" = tracing::field::Empty,
-        "greentic.flow" = tracing::field::Empty,
-        "greentic.node" = tracing::field::Empty,
-        "greentic.provider" = tracing::field::Empty
+        "gt.tenant" = tracing::field::Empty,
+        "gt.session" = tracing::field::Empty,
+        "gt.flow" = tracing::field::Empty,
+        "gt.node" = tracing::field::Empty,
+        "gt.provider" = tracing::field::Empty
     );
     {
         let _root_enter = root.enter();
@@ -35,7 +35,7 @@ fn ctx_is_recorded_on_spans() {
             Level::DEBUG,
             "tool_call",
             tool = "embedding",
-            "greentic.node" = tracing::field::Empty
+            "gt.node" = tracing::field::Empty
         );
         let _child_enter = child.enter();
         info!("testing context propagation");
@@ -51,10 +51,10 @@ fn ctx_is_recorded_on_spans() {
     );
 
     for span in &captured {
-        assert_eq!(span.ctx.tenant_id.as_deref(), Some("acme"));
-        assert_eq!(span.ctx.session_id.as_deref(), Some("sess-123"));
-        assert_eq!(span.ctx.flow_id.as_deref(), Some("flow-xyz"));
+        assert_eq!(span.ctx.tenant.as_deref(), Some("acme"));
+        assert_eq!(span.ctx.session.as_deref(), Some("sess-123"));
+        assert_eq!(span.ctx.flow.as_deref(), Some("flow-xyz"));
         assert_eq!(span.ctx.provider.as_deref(), Some("messaging.telegram"));
-        assert_eq!(span.ctx.node_id.as_deref(), Some("qa-1"));
+        assert_eq!(span.ctx.node.as_deref(), Some("qa-1"));
     }
 }
