@@ -1,35 +1,24 @@
 use crate::context::TelemetryCtx;
 use crate::tasklocal::with_current_telemetry_ctx;
 use std::sync::Arc;
-use tracing::{Subscriber, field};
+use tracing::Subscriber;
 use tracing_subscriber::{
-    Registry,
     layer::{Context, Layer},
     registry::LookupSpan,
 };
 
-/// [`Layer`] injecting [`TelemetryCtx`] attributes into spans.
 #[derive(Clone)]
-pub struct CtxLayer {
-    ctx_getter: Arc<dyn Fn() -> Option<TelemetryCtx> + Send + Sync>,
+struct ContextLayer {
+    provider: Arc<dyn Fn() -> Option<TelemetryCtx> + Send + Sync>,
 }
 
-impl CtxLayer {
-    pub fn new<F>(get_ctx: F) -> Self
-    where
-        F: Fn() -> Option<TelemetryCtx> + Send + Sync + 'static,
-    {
-        Self {
-            ctx_getter: Arc::new(get_ctx),
-        }
-    }
-
-    fn snapshot(&self) -> Option<TelemetryCtx> {
-        (self.ctx_getter)()
+impl ContextLayer {
+    fn new(provider: Arc<dyn Fn() -> Option<TelemetryCtx> + Send + Sync>) -> Self {
+        Self { provider }
     }
 }
 
-impl<S> Layer<S> for CtxLayer
+impl<S> Layer<S> for ContextLayer
 where
     S: Subscriber + for<'lookup> LookupSpan<'lookup>,
 {
@@ -39,70 +28,41 @@ where
         id: &tracing::span::Id,
         ctx: Context<'_, S>,
     ) {
-        if let Some(span_ref) = ctx.span(id)
-            && let Some(telemetry) = self.snapshot()
-            && !telemetry.is_empty()
+        if let Some(span) = ctx.span(id)
+            && let Some(tctx) = (self.provider)()
         {
-            span_ref.extensions_mut().insert(telemetry);
+            let _ = span.extensions_mut().replace(tctx);
         }
     }
 
     fn on_enter(&self, id: &tracing::span::Id, ctx: Context<'_, S>) {
-        if let Some(span_ref) = ctx.span(id) {
-            let telemetry = if let Some(existing) = span_ref.extensions().get::<TelemetryCtx>() {
-                existing.clone()
-            } else if let Some(snapshot) = self.snapshot() {
-                if snapshot.is_empty() {
-                    return;
+        if let Some(span) = ctx.span(id) {
+            let telemetry = span
+                .extensions()
+                .get::<TelemetryCtx>()
+                .cloned()
+                .or_else(|| (self.provider)());
+
+            if let Some(tctx) = telemetry {
+                let current = tracing::Span::current();
+                for (key, value) in tctx.kv() {
+                    if let Some(v) = value {
+                        current.record(key, tracing::field::display(v));
+                    }
                 }
-                span_ref.extensions_mut().insert(snapshot.clone());
-                snapshot
-            } else {
-                return;
-            };
-
-            record_fields(&telemetry);
-
-            #[cfg(feature = "otlp")]
-            apply_otel_attributes(&telemetry);
+                let _ = span.extensions_mut().replace(tctx);
+            }
         }
     }
 }
 
-fn record_fields(ctx: &TelemetryCtx) {
-    let span = tracing::Span::current();
-    if span.is_disabled() {
-        return;
-    }
-
-    for (key, value) in ctx.to_span_kv() {
-        span.record(key, field::display(value));
-    }
+pub fn layer_from_task_local() -> impl Layer<tracing_subscriber::Registry> + Clone {
+    let provider = Arc::new(|| with_current_telemetry_ctx(|ctx| ctx.cloned()));
+    ContextLayer::new(provider)
 }
 
-#[cfg(feature = "otlp")]
-fn apply_otel_attributes(ctx: &TelemetryCtx) {
-    use tracing_opentelemetry::OpenTelemetrySpanExt;
-
-    let span = tracing::Span::current();
-    if span.is_disabled() {
-        return;
-    }
-
-    for (key, value) in ctx.to_span_kv() {
-        span.set_attribute(key, value);
-    }
-}
-
-/// Layer capturing telemetry context from a task-local slot.
-pub fn layer_from_task_local() -> impl Layer<Registry> + Send + Sync + 'static {
-    layer_with(|| with_current_telemetry_ctx(|ctx| ctx))
-}
-
-/// Layer that captures telemetry context via a caller-provided closure.
-pub fn layer_with<F>(provider: F) -> CtxLayer
-where
-    F: Fn() -> Option<TelemetryCtx> + Send + Sync + 'static,
-{
-    CtxLayer::new(provider)
+pub fn layer_with_provider(
+    provider: impl Fn() -> Option<TelemetryCtx> + Send + Sync + 'static,
+) -> impl Layer<tracing_subscriber::Registry> + Clone {
+    ContextLayer::new(Arc::new(provider))
 }

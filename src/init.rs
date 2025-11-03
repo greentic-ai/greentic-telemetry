@@ -1,98 +1,121 @@
 use once_cell::sync::OnceCell;
-use opentelemetry::{KeyValue, global, trace::TracerProvider};
-use opentelemetry_otlp::{SpanExporter, WithExportConfig};
-use opentelemetry_sdk::{Resource, trace::SdkTracerProvider};
-use std::time::Duration;
 use thiserror::Error;
-use tracing_subscriber::{Registry, layer::Layer};
+use tracing_subscriber::{EnvFilter, Registry, layer::Layer, prelude::*};
 
 static INIT_GUARD: OnceCell<()> = OnceCell::new();
-static PROVIDER: OnceCell<SdkTracerProvider> = OnceCell::new();
 
-/// OTLP pipeline configuration for Greentic services.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct OtlpConfig {
-    pub endpoint: String,
     pub service_name: String,
-    pub insecure: bool,
+    pub endpoint: Option<String>,
+    pub sampling_rate: Option<f64>,
 }
 
 #[derive(Debug, Error)]
 pub enum TelemetryError {
-    #[error("telemetry already initialized")]
-    AlreadyInitialized,
-    #[error("failed to build OTLP exporter: {0}")]
-    Exporter(#[from] opentelemetry_otlp::ExporterBuildError),
-    #[error("failed to install tracing subscriber: {0}")]
-    SetGlobal(#[from] tracing::subscriber::SetGlobalDefaultError),
+    #[error("init error: {0}")]
+    Init(String),
 }
 
-/// Builds and installs a tracing subscriber with an OTLP exporter attached.
 pub fn init_otlp(
     cfg: OtlpConfig,
-    extra_layers: Vec<Box<dyn Layer<Registry> + Send + Sync + 'static>>,
+    extra_layers: Vec<Box<dyn Layer<Registry> + Send + Sync>>,
 ) -> Result<(), TelemetryError> {
-    if INIT_GUARD.get().is_some() {
-        return Err(TelemetryError::AlreadyInitialized);
-    }
-
-    let mut exporter_builder = SpanExporter::builder().with_tonic();
-    exporter_builder = exporter_builder
-        .with_endpoint(cfg.endpoint.clone())
-        .with_timeout(Duration::from_secs(3));
-    let exporter = exporter_builder.build().map_err(TelemetryError::Exporter)?;
-
-    let resource = Resource::builder_empty()
-        .with_attributes([KeyValue::new("service.name", cfg.service_name.clone())])
-        .build();
-
-    let provider = SdkTracerProvider::builder()
-        .with_resource(resource)
-        .with_batch_exporter(exporter)
-        .build();
-
-    let tracer = provider.tracer("greentic-telemetry");
-    let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer).boxed();
-
-    let mut layers: Vec<Box<dyn Layer<Registry> + Send + Sync>> = Vec::new();
-
-    #[cfg(feature = "fmt")]
+    #[cfg(feature = "otlp")]
     {
-        let fmt_layer = tracing_subscriber::fmt::layer()
-            .with_target(false)
-            .with_thread_ids(false)
-            .with_thread_names(false)
-            .boxed();
-        layers.push(fmt_layer);
+        if INIT_GUARD.get().is_some() {
+            return Ok(());
+        }
+
+        use opentelemetry::global;
+        use opentelemetry_otlp::WithExportConfig;
+        use opentelemetry_sdk::resource::Resource;
+        use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
+
+        let endpoint = cfg
+            .endpoint
+            .or_else(|| std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok())
+            .unwrap_or_else(|| "http://localhost:4317".into());
+
+        let mut exporter_builder = opentelemetry_otlp::SpanExporter::builder().with_tonic();
+        exporter_builder = exporter_builder.with_endpoint(endpoint);
+        let exporter = exporter_builder
+            .build()
+            .map_err(|e| TelemetryError::Init(e.to_string()))?;
+
+        let resource = Resource::builder()
+            .with_service_name(cfg.service_name)
+            .build();
+
+        let sampler = match cfg.sampling_rate.unwrap_or(1.0) {
+            x if (0.0..1.0).contains(&x) && x < 1.0 => Sampler::TraceIdRatioBased(x),
+            _ => Sampler::AlwaysOn,
+        };
+
+        let provider = SdkTracerProvider::builder()
+            .with_batch_exporter(exporter)
+            .with_sampler(sampler)
+            .with_resource(resource)
+            .build();
+
+        use opentelemetry::trace::TracerProvider as _;
+
+        let tracer = provider.tracer("greentic-telemetry");
+        global::set_tracer_provider(provider);
+
+        let extra_layer = combine_layers(extra_layers)
+            .unwrap_or_else(|| tracing_subscriber::layer::Identity::new().boxed());
+
+        let subscriber = Registry::default().with(extra_layer);
+
+        let subscriber = subscriber
+            .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")));
+
+        let subscriber = subscriber.with(tracing_opentelemetry::layer().with_tracer(tracer));
+
+        #[cfg(feature = "fmt")]
+        let subscriber =
+            subscriber.with(if std::env::var("GT_TELEMETRY_FMT").as_deref() == Ok("1") {
+                Some(
+                    tracing_subscriber::fmt::layer()
+                        .with_target(true)
+                        .with_thread_ids(true),
+                )
+            } else {
+                None
+            });
+
+        subscriber
+            .try_init()
+            .map_err(|e: tracing_subscriber::util::TryInitError| {
+                TelemetryError::Init(e.to_string())
+            })?;
+
+        let _ = INIT_GUARD.set(());
     }
 
-    layers.push(otel_layer);
-    layers.extend(extra_layers);
-
-    let mut layer_iter = layers.into_iter();
-    let mut combined = layer_iter
-        .next()
-        .unwrap_or_else(|| tracing_subscriber::layer::Identity::new().boxed());
-
-    for layer in layer_iter {
-        combined = combined.and_then(layer).boxed();
+    #[cfg(not(feature = "otlp"))]
+    {
+        let _ = (cfg, extra_layers);
+        return Err(TelemetryError::Init("built without `otlp` feature".into()));
     }
-
-    let subscriber = combined.with_subscriber(Registry::default());
-
-    let dispatch = tracing::dispatcher::Dispatch::new(subscriber);
-    tracing::dispatcher::set_global_default(dispatch)?;
-
-    global::set_tracer_provider(provider.clone());
-    let _ = PROVIDER.set(provider);
-    let _ = INIT_GUARD.set(());
 
     Ok(())
 }
 
-/// Flushes any pending OTLP spans.
-pub fn shutdown() {
-    if let Some(provider) = PROVIDER.get() {
-        let _ = provider.shutdown();
+#[cfg(feature = "otlp")]
+fn combine_layers(
+    mut layers: Vec<Box<dyn Layer<Registry> + Send + Sync>>,
+) -> Option<Box<dyn Layer<Registry> + Send + Sync>> {
+    let mut iter = layers.drain(..);
+    let mut combined = match iter.next() {
+        Some(layer) => layer.boxed(),
+        None => return None,
+    };
+
+    for layer in iter {
+        combined = combined.and_then(layer).boxed();
     }
+
+    Some(combined)
 }

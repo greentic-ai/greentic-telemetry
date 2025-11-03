@@ -1,51 +1,43 @@
 # greentic-telemetry
 
-Tenant-aware telemetry utilities for Greentic services built on top of [`tracing`], [`opentelemetry`], and the shared [`greentic-types`] domain crate.
+Tenant-aware telemetry utilities for Greentic services built on top of [`tracing`] and [`opentelemetry`].
 
 [`tracing`]: https://github.com/tokio-rs/tracing
 [`opentelemetry`]: https://opentelemetry.io/
-[`greentic-types`]: https://github.com/greentic-ai/greentic-types
 
 ## Highlights
 
 - `TelemetryCtx`: lightweight context carrying `{tenant, session, flow, node, provider}`.
 - `layer_from_task_local`: grab the context from a Tokio task-local without wiring closures.
 - `CtxLayer` (`layer_with`): legacy closure-based path kept for backwards compatibility.
-- `init_otlp`: install an OTLP pipeline (with optional `fmt` layer) and flush on shutdown.
+- `init_otlp`: install an OTLP pipeline (with optional `fmt` layer when `GT_TELEMETRY_FMT=1`).
 - Utilities for integration testing (`testutil::span_recorder`) and task-local helpers.
 
 ## Quickstart
 
 ```rust
 use greentic_telemetry::{
-    init_otlp, layer_from_task_local, set_current_tenant_ctx, set_current_telemetry_ctx,
-    with_current_telemetry_ctx, with_task_local, OtlpConfig,
+    init_otlp, layer_from_task_local, set_current_telemetry_ctx, with_task_local, OtlpConfig,
+    TelemetryCtx,
 };
-use greentic_types::{EnvId, TenantCtx, TenantId};
 use tracing::{info, span, Level};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     with_task_local(async {
-        set_current_tenant_ctx(TenantCtx::new(
-            EnvId::from("prod"),
-            TenantId::from("acme"),
-        ));
-        with_current_telemetry_ctx(|base| {
-            let enriched = base
-                .unwrap_or_default()
+        set_current_telemetry_ctx(
+            TelemetryCtx::new("tenant-acme")
                 .with_session("sess-123")
                 .with_flow("flow-intake")
                 .with_node("node-parse")
-                .with_provider("runner");
-            set_current_telemetry_ctx(enriched);
-        });
+                .with_provider("runner"),
+        );
 
         init_otlp(
             OtlpConfig {
-                endpoint: "http://localhost:4317".into(),
                 service_name: "greentic-runner".into(),
-                insecure: true,
+                endpoint: Some("http://localhost:4317".into()),
+                sampling_rate: Some(1.0),
             },
             vec![Box::new(layer_from_task_local())],
         )?;
@@ -62,7 +54,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _enter = span.enter();
         info!("executing node with injected telemetry context");
 
-        greentic_telemetry::shutdown();
         Ok(())
     })
     .await
@@ -70,19 +61,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 Spans automatically receive the Greentic attributes (as tracing fields and OTLP attributes), ensuring the collector exports `{tenant, session, flow, node, provider}` consistently via the task-local path.
-
-### Bridging `greentic-types`
-
-`TelemetryCtx` implements `From<&greentic_types::TenantCtx>`, so existing tenant metadata can be attached without manual string conversions:
-
-```rust
-use greentic_telemetry::TelemetryCtx;
-use greentic_types::TenantCtx;
-
-fn tenant_ctx(ctx: &TenantCtx) -> TelemetryCtx {
-    TelemetryCtx::from(ctx)
-}
-```
 
 ## OTLP wiring
 
@@ -92,7 +70,7 @@ fn tenant_ctx(ctx: &TenantCtx) -> TelemetryCtx {
 - `tracing_opentelemetry::layer` connected to an OTLP gRPC exporter
 - `service.name` populated from `OtlpConfig`
 
-The subscriber becomes the global default; call `shutdown()` during graceful shutdown to flush spans.
+The subscriber becomes the global default; use `opentelemetry::global::shutdown_tracer_provider()` during graceful shutdown to flush spans.
 
 ## Testing utilities
 

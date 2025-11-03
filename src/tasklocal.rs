@@ -1,75 +1,43 @@
 use crate::context::TelemetryCtx;
-use greentic_types::TenantCtx;
-use std::cell::RefCell;
-use std::future::Future;
+use std::{cell::RefCell, future::Future};
 
 tokio::task_local! {
-    static GT_TENANT_CTX: RefCell<Option<TenantCtx>>;
     static GT_TELEMETRY_CTX: RefCell<Option<TelemetryCtx>>;
 }
 
-/// Run `fut` with task-local storage initialised for telemetry.
-pub async fn with_task_local<Fut, T>(fut: Fut) -> T
-where
-    Fut: Future<Output = T>,
-{
-    GT_TENANT_CTX
-        .scope(RefCell::new(None), async move {
-            GT_TELEMETRY_CTX.scope(RefCell::new(None), fut).await
-        })
-        .await
-}
-
-/// Set the task-local tenant context for the current asynchronous task.
-pub fn set_current_tenant_ctx(ctx: TenantCtx) {
-    let tenant = ctx.clone();
-    if let Ok(()) = GT_TENANT_CTX.try_with(|slot| {
-        *slot.borrow_mut() = Some(tenant);
-    }) {
-        let telemetry = TelemetryCtx::from(&ctx);
-        let _ = GT_TELEMETRY_CTX.try_with(|slot| {
-            *slot.borrow_mut() = Some(telemetry);
-        });
-    }
-}
-
-/// Replace the task-local telemetry context with an explicit value.
+/// Set the task-local telemetry context. No-op if outside a Tokio task.
 pub fn set_current_telemetry_ctx(ctx: TelemetryCtx) {
     let _ = GT_TELEMETRY_CTX.try_with(|slot| {
         *slot.borrow_mut() = Some(ctx);
     });
 }
 
-/// Execute `f` with the currently configured telemetry context, if any.
-pub fn with_current_telemetry_ctx<F, R>(f: F) -> R
+/// Execute `f` with the telemetry context currently stored on this task, if any.
+pub fn with_current_telemetry_ctx<R>(f: impl FnOnce(Option<&TelemetryCtx>) -> R) -> R {
+    let mut f = Some(f);
+    let result = GT_TELEMETRY_CTX.try_with(|slot| {
+        let guard = slot.borrow();
+        let func = f
+            .take()
+            .expect("telemetry context closure already consumed");
+        func(guard.as_ref())
+    });
+
+    match result {
+        Ok(value) => value,
+        Err(_) => {
+            let func = f
+                .take()
+                .expect("telemetry context closure already consumed");
+            func(None)
+        }
+    }
+}
+
+/// Run `fut` with a task-local telemetry context slot initialized.
+pub async fn with_task_local<Fut, R>(fut: Fut) -> R
 where
-    F: FnOnce(Option<TelemetryCtx>) -> R,
+    Fut: Future<Output = R>,
 {
-    let value = GT_TELEMETRY_CTX
-        .try_with(|slot| {
-            if let Some(existing) = slot.borrow().clone() {
-                return Some(existing);
-            }
-
-            let base = GT_TENANT_CTX
-                .try_with(|tenant| tenant.borrow().as_ref().map(TelemetryCtx::from))
-                .ok()
-                .flatten();
-
-            if let Some(ref ctx) = base {
-                *slot.borrow_mut() = Some(ctx.clone());
-            }
-
-            base
-        })
-        .ok()
-        .flatten()
-        .or_else(|| {
-            GT_TENANT_CTX
-                .try_with(|tenant| tenant.borrow().as_ref().map(TelemetryCtx::from))
-                .ok()
-                .flatten()
-        });
-
-    f(value)
+    GT_TELEMETRY_CTX.scope(RefCell::new(None), fut).await
 }
