@@ -98,3 +98,13 @@ cargo fmt
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 ```
+
+## Local CI checks
+
+Run `ci/local_check.sh` before pushing to mirror the GitHub Actions matrix locally. The script is offline by default; opt in to extra checks via:
+
+- `LOCAL_CHECK_ONLINE=1` — run networked steps (cargo publish dry-run, cloud telemetry loops, schema curls).
+- `LOCAL_CHECK_STRICT=1` — treat skipped steps as failures and require every optional tool/env to be present.
+- `LOCAL_CHECK_VERBOSE=1` — echo each command for easier debugging.
+
+The generated `.git/hooks/pre-push` hook invokes the script automatically; remove or edit it if you prefer to run the checks manually.
