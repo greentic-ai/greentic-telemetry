@@ -1075,7 +1075,7 @@ dependencies = [
 
 [[package]]
 name = "greentic-telemetry"
-version = "0.5.2"
+version = "0.5.4"
 dependencies = [
  "anyhow",
  "async-trait",
