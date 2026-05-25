@@ -134,7 +134,12 @@ fn unset_rollout_ids_are_absent_from_exported_attributes() {
     let keys = attr_keys(span);
     assert!(keys.contains(&"gt.tenant".to_string()));
     assert!(keys.contains(&"gt.env".to_string()));
-    for absent in ["gt.customer_id", "gt.deployment_id", "gt.revision_id"] {
+    for absent in [
+        "gt.customer_id",
+        "gt.deployment_id",
+        "gt.bundle_id",
+        "gt.revision_id",
+    ] {
         assert!(
             !keys.contains(&absent.to_string()),
             "`{absent}` must be absent when unset; got {keys:?}"
