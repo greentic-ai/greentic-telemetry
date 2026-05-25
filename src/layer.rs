@@ -44,12 +44,12 @@ where
                 .or_else(|| (self.provider)());
 
             if let Some(tctx) = telemetry {
-                let current = tracing::Span::current();
-                for (key, value) in tctx.kv() {
-                    if let Some(v) = value {
-                        current.record(key, tracing::field::display(v));
-                    }
-                }
+                // Store the context for capture/inspection layers only. Do NOT
+                // record gt.* fields here: `Span::record` is a silent no-op for
+                // fields the callsite didn't declare, and `Span::current()` is
+                // the parent span, not the one being entered — so the old record
+                // loop attributed nothing. OTLP attribute export goes through
+                // `annotate_span`.
                 let _ = span.extensions_mut().replace(tctx);
             }
         }
@@ -80,8 +80,16 @@ pub fn annotate_span(span: &tracing::Span, tctx: &TelemetryCtx) {
 /// `set_current_telemetry_ctx` / the tenant-ctx bridge). No-op when none is set.
 #[cfg(any(feature = "otlp", feature = "azure", feature = "gcp"))]
 pub fn annotate_current_span(span: &tracing::Span) {
-    if let Some(tctx) = with_current_telemetry_ctx(|ctx| ctx.cloned()) {
-        annotate_span(span, &tctx);
+    match with_current_telemetry_ctx(|ctx| ctx.cloned()) {
+        Some(tctx) => annotate_span(span, &tctx),
+        // No task-local TelemetryCtx in scope (called outside `with_task_local`
+        // or before `set_current_telemetry_ctx`). The span then exports with no
+        // `gt.*` attribution — surface it at debug so unattributed spans are
+        // diagnosable rather than silently lost.
+        None => tracing::debug!(
+            "annotate_current_span: no task-local TelemetryCtx in scope; \
+             span exported without gt.* attributes"
+        ),
     }
 }
 

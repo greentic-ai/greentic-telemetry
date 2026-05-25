@@ -127,6 +127,8 @@ events can be attributed per revision, per deployed bundle, and per customer
 | `revision_id` | `gt.revision_id` | ✅ | ❌ | ULID, unbounded |
 | `session` | `gt.session` | ✅ | ❌ | unbounded |
 | `node` | `gt.node` | ✅ | ❌ | unbounded |
+| `flow` | `gt.flow` | ✅ | ❌ | spans/logs only; not in the metric subset |
+| `provider` | `gt.provider` | ✅ | ❌ | spans/logs only; not in the metric subset |
 
 **Rule:** never pass an unbounded identifier as a metric label — each distinct
 value is a new time series, so `deployment_id`/`revision_id`/`customer_id` would
