@@ -148,60 +148,103 @@ static MIN_LEVEL: AtomicU8 = AtomicU8::new(0); // 0 = Level::Trace; no filtering
 /// don't need to special-case it.
 const FILTERED_SPAN_ID: u64 = 0;
 
-#[track_caller]
-pub fn log(level: Level, message: &str, fields: &[Field<'_>]) {
+/// Emit a log line attributing the source location to an explicit
+/// `Location` rather than `Location::caller()`. Use this when the natural
+/// caller (e.g. `Drop::drop`) is not the source line you want to surface;
+/// capture `Location::caller()` at the actual call site, store it, and pass
+/// it back here later.
+///
+/// On the `wit-guest` path the explicit caller is ignored because the host
+/// owns location attribution.
+#[cfg(not(all(target_arch = "wasm32", feature = "wit-guest")))]
+pub fn log_at(
+    level: Level,
+    message: &str,
+    fields: &[Field<'_>],
+    caller: &'static Location<'static>,
+) {
     if !level_is_enabled(level) {
         return;
     }
-    #[cfg(all(target_arch = "wasm32", feature = "wit-guest"))]
-    {
-        host::log(level, message, fields);
+    fallback_log(level, message, fields, caller);
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wit-guest"))]
+pub fn log_at(
+    level: Level,
+    message: &str,
+    fields: &[Field<'_>],
+    _caller: &'static std::panic::Location<'static>,
+) {
+    if !level_is_enabled(level) {
+        return;
     }
-    #[cfg(not(all(target_arch = "wasm32", feature = "wit-guest")))]
-    {
-        let caller = Location::caller();
-        fallback_log(level, message, fields, caller);
+    host::log(level, message, fields);
+}
+
+#[track_caller]
+pub fn log(level: Level, message: &str, fields: &[Field<'_>]) {
+    log_at(level, message, fields, std::panic::Location::caller());
+}
+
+/// `span_start` variant that uses an explicit caller `Location` for the
+/// emitted start line. Pair with [`span_end_at`] so the matching end line
+/// also attributes to the original source line (e.g. when the end fires
+/// from `Drop::drop`).
+#[cfg(not(all(target_arch = "wasm32", feature = "wit-guest")))]
+pub fn span_start_at(name: &str, fields: &[Field<'_>], caller: &'static Location<'static>) -> u64 {
+    if !level_is_enabled(Level::Debug) {
+        return FILTERED_SPAN_ID;
     }
+    fallback_span_start(name, fields, caller)
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wit-guest"))]
+pub fn span_start_at(
+    name: &str,
+    fields: &[Field<'_>],
+    _caller: &'static std::panic::Location<'static>,
+) -> u64 {
+    if !level_is_enabled(Level::Debug) {
+        return FILTERED_SPAN_ID;
+    }
+    host::span_start(name, fields)
 }
 
 #[track_caller]
 pub fn span_start(name: &str, fields: &[Field<'_>]) -> u64 {
-    // Spans emit start + end lines at Debug; if Debug is filtered out, skip
-    // the whole span lifecycle. Returning a sentinel id keeps span_end a
-    // clean no-op.
-    if !level_is_enabled(Level::Debug) {
-        return FILTERED_SPAN_ID;
-    }
-    #[cfg(all(target_arch = "wasm32", feature = "wit-guest"))]
-    {
-        return host::span_start(name, fields);
-    }
-    #[cfg(not(all(target_arch = "wasm32", feature = "wit-guest")))]
-    {
-        let caller = Location::caller();
-        fallback_span_start(name, fields, caller)
-    }
+    span_start_at(name, fields, std::panic::Location::caller())
 }
 
-#[track_caller]
-pub fn span_end(id: u64) {
+/// `span_end` variant that uses an explicit caller `Location` for the
+/// emitted end line. Use this when the end fires from `Drop::drop` (whose
+/// implicit caller is meaningless) and you stored `Location::caller()` at
+/// span creation.
+#[cfg(not(all(target_arch = "wasm32", feature = "wit-guest")))]
+pub fn span_end_at(id: u64, caller: &'static Location<'static>) {
     if id == FILTERED_SPAN_ID {
         return;
     }
     if !level_is_enabled(Level::Debug) {
-        // Level was lowered between span_start and span_end; drop the close
-        // line silently rather than emitting an orphaned end.
         return;
     }
-    #[cfg(all(target_arch = "wasm32", feature = "wit-guest"))]
-    {
-        host::span_end(id);
+    fallback_span_end(id, caller);
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "wit-guest"))]
+pub fn span_end_at(id: u64, _caller: &'static std::panic::Location<'static>) {
+    if id == FILTERED_SPAN_ID {
+        return;
     }
-    #[cfg(not(all(target_arch = "wasm32", feature = "wit-guest")))]
-    {
-        let caller = Location::caller();
-        fallback_span_end(id, caller);
+    if !level_is_enabled(Level::Debug) {
+        return;
     }
+    host::span_end(id);
+}
+
+#[track_caller]
+pub fn span_end(id: u64) {
+    span_end_at(id, std::panic::Location::caller());
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "wit-guest"))]
