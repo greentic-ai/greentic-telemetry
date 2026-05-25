@@ -45,6 +45,8 @@ pub use host_bridge::{HostContext, emit_span as emit_host_span};
 pub use init::{
     TelemetryConfig, init_telemetry, init_telemetry_auto, init_telemetry_from_config, shutdown,
 };
+#[cfg(any(feature = "otlp", feature = "azure", feature = "gcp"))]
+pub use layer::{annotate_current_span, annotate_span};
 pub use layer::{layer_from_task_local, layer_with_provider};
 pub use operation_subs::OperationSubsConfig;
 pub use provider::TelemetryProviderConfig;
