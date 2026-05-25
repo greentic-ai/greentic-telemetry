@@ -13,7 +13,13 @@
 ///   bounded by the deployment topology. The unbounded IDs MUST NOT become
 ///   metric labels (they explode time-series cost); correlate them to metrics
 ///   through trace exemplars instead. See `docs/correlation-model.md`.
+///
+/// `#[non_exhaustive]`: construct via [`TelemetryCtx::new`] + the `with_*`
+/// builders, never a struct literal. The field set grows as the rollout model
+/// gains attributes (C5 adds `pack_id`, env-pack `kind`, rollout generation),
+/// and this keeps each addition non-breaking for downstream crates.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TelemetryCtx {
     pub tenant: String,
     pub session: Option<String>,
