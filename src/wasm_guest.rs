@@ -306,7 +306,9 @@ fn fallback_log(
 /// dependency. Howard Hinnant's date algorithm.
 #[cfg(not(all(target_arch = "wasm32", feature = "wit-guest")))]
 fn rfc3339_now() -> String {
-    let dur = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let dur = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
     let secs = dur.as_secs() as i64;
     let millis = dur.subsec_millis();
 
@@ -318,7 +320,11 @@ fn rfc3339_now() -> String {
 
     // civil_from_days: convert days-from-1970-01-01 to (year, month, day).
     let z = days + 719_468; // shift epoch to 0000-03-01
-    let era = if z >= 0 { z / 146_097 } else { (z - 146_096) / 146_097 };
+    let era = if z >= 0 {
+        z / 146_097
+    } else {
+        (z - 146_096) / 146_097
+    };
     let doe = (z - era * 146_097) as u32;
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
     let y = yoe as i64 + era * 400;
@@ -359,7 +365,10 @@ fn fallback_span_start(
     let id_str = id.to_string();
 
     let mut all_fields: Vec<Field<'_>> = Vec::with_capacity(fields.len() + 1);
-    all_fields.push(Field { key: "id", value: &id_str });
+    all_fields.push(Field {
+        key: "id",
+        value: &id_str,
+    });
     all_fields.extend_from_slice(fields);
     fallback_log(
         Level::Debug,
@@ -382,7 +391,10 @@ fn fallback_span_start(
 
 #[cfg(not(all(target_arch = "wasm32", feature = "wit-guest")))]
 fn fallback_span_end(id: u64, caller: &'static Location<'static>) {
-    let state = span_registry().lock().ok().and_then(|mut reg| reg.remove(&id));
+    let state = span_registry()
+        .lock()
+        .ok()
+        .and_then(|mut reg| reg.remove(&id));
     let id_str = id.to_string();
     match state {
         Some(SpanState { name, started_at }) => {
@@ -391,8 +403,14 @@ fn fallback_span_end(id: u64, caller: &'static Location<'static>) {
                 Level::Debug,
                 &format!("span-end: {name}"),
                 &[
-                    Field { key: "id", value: &id_str },
-                    Field { key: "duration_ms", value: &duration_ms },
+                    Field {
+                        key: "id",
+                        value: &id_str,
+                    },
+                    Field {
+                        key: "duration_ms",
+                        value: &duration_ms,
+                    },
                 ],
                 caller,
             );
@@ -404,7 +422,10 @@ fn fallback_span_end(id: u64, caller: &'static Location<'static>) {
             fallback_log(
                 Level::Debug,
                 "span-end: unknown",
-                &[Field { key: "id", value: &id_str }],
+                &[Field {
+                    key: "id",
+                    value: &id_str,
+                }],
                 caller,
             );
         }
@@ -476,7 +497,10 @@ mod tests {
         // sentinel id; the matching span_end is a no-op.
         set_min_level(Level::Info);
         let id = span_start("filtered", &[]);
-        assert_eq!(id, FILTERED_SPAN_ID, "span_start should return sentinel when filtered");
+        assert_eq!(
+            id, FILTERED_SPAN_ID,
+            "span_start should return sentinel when filtered"
+        );
         span_end(id); // must not panic, must not print "unknown id"
         // Restore default so the rest of the test module is unaffected.
         set_min_level(Level::Trace);
