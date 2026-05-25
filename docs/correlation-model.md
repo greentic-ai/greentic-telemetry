@@ -111,6 +111,35 @@ Metrics use the same dimension labels as spans, enabling cross-referencing:
 - **Metric → Trace**: From a spike in `greentic_operation_error_count`,
   search for traces with `error.type` set in the same time window.
 
+## Revision / Bundle / Customer Attribution & Cardinality (B11)
+
+`TelemetryCtx` carries the deploy-spec rollout identifiers so logs, traces, and
+events can be attributed per revision, per deployed bundle, and per customer
+(P6 billing). These split into **two cardinality tiers**:
+
+| Field | `gt.*` key | Spans/logs (`kv()`) | Metric labels (`metric_attrs()`) | Why |
+|-------|-----------|:-------------------:|:--------------------------------:|-----|
+| `tenant` | `gt.tenant` | ✅ | ✅ | bounded |
+| `env` | `gt.env` | ✅ | ✅ | bounded |
+| `bundle_id` | `gt.bundle_id` | ✅ | ✅ | bounded by the env's bundle set |
+| `customer_id` | `gt.customer_id` | ✅ | ❌ | grows with the customer base |
+| `deployment_id` | `gt.deployment_id` | ✅ | ❌ | ULID, unbounded |
+| `revision_id` | `gt.revision_id` | ✅ | ❌ | ULID, unbounded |
+| `session` | `gt.session` | ✅ | ❌ | unbounded |
+| `node` | `gt.node` | ✅ | ❌ | unbounded |
+
+**Rule:** never pass an unbounded identifier as a metric label — each distinct
+value is a new time series, so `deployment_id`/`revision_id`/`customer_id` would
+explode storage and query cost. Use `TelemetryCtx::metric_attrs()` (the bounded
+`{tenant, env, bundle_id}` subset) when recording metrics, and rely on **trace
+exemplars** to jump from an aggregated metric point to the specific revision /
+deployment / customer that produced it. The full set lives on spans and logs via
+`TelemetryCtx::kv()`, where high cardinality is free.
+
+The downstream P6 billing aggregator reads `customer_id`/`deployment_id`/
+`bundle_id`/`revision_id` from the **usage event / span** stream, not from
+metric labels.
+
 ## Multi-Tenant Isolation
 
 Each root span carries `greentic.tenant.id` and `greentic.team.id`,
