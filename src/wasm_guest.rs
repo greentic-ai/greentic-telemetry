@@ -48,6 +48,8 @@
 //! so subsequent calls to the identity setter after the first are ignored
 //! (no panic).
 
+use std::sync::atomic::{AtomicU8, Ordering};
+
 #[cfg(not(all(target_arch = "wasm32", feature = "wit-guest")))]
 use std::panic::Location;
 #[cfg(not(all(target_arch = "wasm32", feature = "wit-guest")))]
@@ -55,7 +57,7 @@ use std::sync::Mutex;
 #[cfg(not(all(target_arch = "wasm32", feature = "wit-guest")))]
 use std::sync::OnceLock;
 #[cfg(not(all(target_arch = "wasm32", feature = "wit-guest")))]
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64};
 #[cfg(not(all(target_arch = "wasm32", feature = "wit-guest")))]
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -66,6 +68,18 @@ pub enum Level {
     Info,
     Warn,
     Error,
+}
+
+impl Level {
+    fn rank(self) -> u8 {
+        match self {
+            Level::Trace => 0,
+            Level::Debug => 1,
+            Level::Info => 2,
+            Level::Warn => 3,
+            Level::Error => 4,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -105,8 +119,40 @@ pub fn set_caller_location_enabled(enabled: bool) {
     }
 }
 
+/// Set the minimum level for emission. Calls to [`log`] / [`span_start`] /
+/// [`span_end`] at a level below this threshold short-circuit before
+/// formatting and before any stdout write, so tight `Trace` / `Debug` loops
+/// pay nothing.
+///
+/// Spans (start + end) emit at `Level::Debug` in the fallback path, so
+/// setting the threshold to `Info` or higher silences all spans as well.
+/// `span_start` still returns a sentinel id so the matching `span_end` is a
+/// no-op rather than an "unknown id" diagnostic.
+///
+/// Defaults to `Level::Trace` (no filtering). On the `wit-guest` path the
+/// check still applies on the guest side so we never cross the WIT boundary
+/// for filtered events. The host pipeline's own filter (e.g. `RUST_LOG`)
+/// remains the authoritative level filter for what gets exported.
+pub fn set_min_level(level: Level) {
+    MIN_LEVEL.store(level.rank(), Ordering::Relaxed);
+}
+
+fn level_is_enabled(level: Level) -> bool {
+    level.rank() >= MIN_LEVEL.load(Ordering::Relaxed)
+}
+
+static MIN_LEVEL: AtomicU8 = AtomicU8::new(0); // 0 = Level::Trace; no filtering.
+
+/// Sentinel returned by [`span_start`] when the configured minimum level
+/// filters the span out. [`span_end`] treats this id as a no-op so callers
+/// don't need to special-case it.
+const FILTERED_SPAN_ID: u64 = 0;
+
 #[track_caller]
 pub fn log(level: Level, message: &str, fields: &[Field<'_>]) {
+    if !level_is_enabled(level) {
+        return;
+    }
     #[cfg(all(target_arch = "wasm32", feature = "wit-guest"))]
     {
         host::log(level, message, fields);
@@ -120,6 +166,12 @@ pub fn log(level: Level, message: &str, fields: &[Field<'_>]) {
 
 #[track_caller]
 pub fn span_start(name: &str, fields: &[Field<'_>]) -> u64 {
+    // Spans emit start + end lines at Debug; if Debug is filtered out, skip
+    // the whole span lifecycle. Returning a sentinel id keeps span_end a
+    // clean no-op.
+    if !level_is_enabled(Level::Debug) {
+        return FILTERED_SPAN_ID;
+    }
     #[cfg(all(target_arch = "wasm32", feature = "wit-guest"))]
     {
         return host::span_start(name, fields);
@@ -133,6 +185,14 @@ pub fn span_start(name: &str, fields: &[Field<'_>]) -> u64 {
 
 #[track_caller]
 pub fn span_end(id: u64) {
+    if id == FILTERED_SPAN_ID {
+        return;
+    }
+    if !level_is_enabled(Level::Debug) {
+        // Level was lowered between span_start and span_end; drop the close
+        // line silently rather than emitting an orphaned end.
+        return;
+    }
     #[cfg(all(target_arch = "wasm32", feature = "wit-guest"))]
     {
         host::span_end(id);
@@ -408,5 +468,28 @@ mod tests {
         assert!(!CALLER_LOCATION_ENABLED.load(Ordering::Relaxed));
         set_caller_location_enabled(true);
         assert!(CALLER_LOCATION_ENABLED.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn min_level_filters_span_start_to_sentinel() {
+        // With min=Info, Debug-level spans are filtered out and return the
+        // sentinel id; the matching span_end is a no-op.
+        set_min_level(Level::Info);
+        let id = span_start("filtered", &[]);
+        assert_eq!(id, FILTERED_SPAN_ID, "span_start should return sentinel when filtered");
+        span_end(id); // must not panic, must not print "unknown id"
+        // Restore default so the rest of the test module is unaffected.
+        set_min_level(Level::Trace);
+    }
+
+    #[test]
+    fn min_level_lets_in_at_or_above_threshold() {
+        set_min_level(Level::Warn);
+        assert!(!level_is_enabled(Level::Trace));
+        assert!(!level_is_enabled(Level::Debug));
+        assert!(!level_is_enabled(Level::Info));
+        assert!(level_is_enabled(Level::Warn));
+        assert!(level_is_enabled(Level::Error));
+        set_min_level(Level::Trace);
     }
 }
