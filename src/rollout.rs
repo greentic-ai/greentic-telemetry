@@ -6,13 +6,11 @@
 //! transition as a structured telemetry item so operators can trace a rollout
 //! end to end and correlate it with the revision/bundle/deployment it touched.
 //!
-//! Each transition rides on a short-lived `greentic.rollout` span carrying the
-//! full [`TelemetryCtx`] attribute set via the [`annotate_span`] export
-//! primitive, so the `gt.*` attribution reaches OTLP regardless of the span
-//! callsite. The inner `info!` marker keeps the transition visible to plain
-//! log subscribers when no OTLP exporter is configured.
-//!
-//! [`annotate_span`]: crate::layer::annotate_span
+//! Each transition rides on a short-lived `greentic.rollout` span that declares
+//! the full `gt.*` field set at its callsite and records the present values, so
+//! the attribution reaches **every** subscriber — fmt, json, and OTLP — and
+//! survives even when no span exporter is configured or the span is sampled
+//! out. The inner `info!` marker keeps the transition visible as a log line.
 
 use crate::TelemetryCtx;
 
@@ -53,18 +51,43 @@ impl RolloutEvent {
 
 /// Record a rollout lifecycle transition, attributed to `tctx`.
 ///
-/// Emits a `greentic.rollout` span annotated with the full `gt.*` set plus a
-/// `rollout.event` discriminant, and an `info!` marker inside it. Safe to call
-/// with no subscriber installed (then it is a no-op beyond the cheap span
+/// Emits a `greentic.rollout` span carrying the full present `gt.*` attribution
+/// plus a `rollout.event` discriminant, and an `info!` marker inside it. Safe to
+/// call with no subscriber installed (then it is a no-op beyond the cheap span
 /// construction).
+///
+/// The `gt.*` fields are declared at the callsite and populated via
+/// [`Span::record`](tracing::Span::record), rather than `annotate_span`'s
+/// OTLP-only `set_attribute`, so the attribution reaches fmt/json subscribers
+/// too — the identifiers operators need during a rollout incident survive even
+/// when no OTLP exporter is configured.
 pub fn emit_rollout_event(event: RolloutEvent, tctx: &TelemetryCtx) {
-    let span = tracing::info_span!("greentic.rollout", rollout.event = event.as_str());
-    #[cfg(any(feature = "otlp", feature = "azure", feature = "gcp"))]
-    crate::layer::annotate_span(&span, tctx);
+    let span = tracing::info_span!(
+        "greentic.rollout",
+        rollout.event = event.as_str(),
+        gt.tenant = tracing::field::Empty,
+        gt.team = tracing::field::Empty,
+        gt.session = tracing::field::Empty,
+        gt.flow = tracing::field::Empty,
+        gt.node = tracing::field::Empty,
+        gt.provider = tracing::field::Empty,
+        gt.env = tracing::field::Empty,
+        gt.customer_id = tracing::field::Empty,
+        gt.deployment_id = tracing::field::Empty,
+        gt.bundle_id = tracing::field::Empty,
+        gt.revision_id = tracing::field::Empty,
+        gt.pack_id = tracing::field::Empty,
+        gt.env_pack_kind = tracing::field::Empty,
+        gt.generation = tracing::field::Empty,
+    );
+    for (key, value) in tctx.kv() {
+        if let Some(v) = value {
+            span.record(key, v);
+        }
+    }
     let _enter = span.enter();
     tracing::info!(
         rollout.event = event.as_str(),
-        gt.tenant = %tctx.tenant,
         "rollout lifecycle transition"
     );
 }
@@ -104,5 +127,78 @@ mod tests {
             .with_generation("3");
         emit_rollout_event(RolloutEvent::TrafficSplitApplied, &ctx);
         emit_rollout_event(RolloutEvent::HealthGateFailed, &ctx);
+    }
+
+    /// Regression for the Codex finding: the rollout attribution must reach
+    /// subscribers WITHOUT relying on OTLP span export. A plain registry layer
+    /// (no `otlp`/`azure`/`gcp` feature, no task-local bridge) must still see
+    /// the revision/bundle/deployment/pack/env-pack/generation identifiers.
+    #[test]
+    fn rollout_fields_survive_on_non_otlp_subscriber() {
+        use std::collections::BTreeMap;
+        use std::sync::{Arc, Mutex};
+        use tracing::Subscriber;
+        use tracing::field::{Field, Visit};
+        use tracing::span::{Attributes, Id, Record};
+        use tracing_subscriber::layer::{Context, Layer};
+        use tracing_subscriber::prelude::*;
+        use tracing_subscriber::registry::LookupSpan;
+
+        #[derive(Default)]
+        struct Grab(BTreeMap<String, String>);
+        impl Visit for Grab {
+            fn record_str(&mut self, field: &Field, value: &str) {
+                self.0.insert(field.name().to_string(), value.to_string());
+            }
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                self.0
+                    .entry(field.name().to_string())
+                    .or_insert_with(|| format!("{value:?}"));
+            }
+        }
+
+        struct Capture(Arc<Mutex<BTreeMap<String, String>>>);
+        impl<S: Subscriber + for<'a> LookupSpan<'a>> Layer<S> for Capture {
+            fn on_new_span(&self, attrs: &Attributes<'_>, _id: &Id, _ctx: Context<'_, S>) {
+                let mut g = Grab::default();
+                attrs.record(&mut g);
+                self.0.lock().unwrap().extend(g.0);
+            }
+            fn on_record(&self, _id: &Id, values: &Record<'_>, _ctx: Context<'_, S>) {
+                let mut g = Grab::default();
+                values.record(&mut g);
+                self.0.lock().unwrap().extend(g.0);
+            }
+        }
+
+        let store = Arc::new(Mutex::new(BTreeMap::new()));
+        let subscriber = tracing_subscriber::registry().with(Capture(Arc::clone(&store)));
+        tracing::subscriber::with_default(subscriber, || {
+            let ctx = TelemetryCtx::new("acme")
+                .with_team("support")
+                .with_env("prod-eu")
+                .with_deployment_id("01JTKS")
+                .with_bundle_id("customer.support")
+                .with_revision_id("01JTKR")
+                .with_pack_id("customer.support@1.2.0")
+                .with_env_pack_kind("greentic.deployer.k8s")
+                .with_generation("3");
+            emit_rollout_event(RolloutEvent::TrafficSplitApplied, &ctx);
+        });
+
+        let got = store.lock().unwrap();
+        let f = |k: &str| got.get(k).map(String::as_str);
+        assert_eq!(f("rollout.event"), Some("rollout.traffic_split.applied"));
+        assert_eq!(f("gt.tenant"), Some("acme"));
+        assert_eq!(f("gt.team"), Some("support"));
+        assert_eq!(f("gt.env"), Some("prod-eu"));
+        assert_eq!(f("gt.deployment_id"), Some("01JTKS"));
+        assert_eq!(f("gt.bundle_id"), Some("customer.support"));
+        assert_eq!(f("gt.revision_id"), Some("01JTKR"));
+        assert_eq!(f("gt.pack_id"), Some("customer.support@1.2.0"));
+        assert_eq!(f("gt.env_pack_kind"), Some("greentic.deployer.k8s"));
+        assert_eq!(f("gt.generation"), Some("3"));
+        // Unset optional fields must not surface with a value.
+        assert_eq!(f("gt.customer_id"), None);
     }
 }
