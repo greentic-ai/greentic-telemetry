@@ -43,8 +43,9 @@ pub struct TelemetryCtx {
     /// Env-pack kind backing the environment (C5, e.g. `greentic.deployer.k8s`).
     /// Span/log only — unbounded.
     pub env_pack_kind: Option<String>,
-    /// Rollout generation of the deployment's routing table (C5). Stringified
-    /// `u64`. Span/log only — unbounded.
+    /// Rollout generation of the deployment's routing table (C5), as the
+    /// decimal string of a `u64` (set via [`with_generation`](Self::with_generation)).
+    /// Span/log only — unbounded.
     pub generation: Option<String>,
 }
 
@@ -116,8 +117,11 @@ impl TelemetryCtx {
         self
     }
 
-    pub fn with_generation(mut self, v: impl Into<String>) -> Self {
-        self.generation = Some(v.into());
+    /// Set the rollout generation. Takes a `u64` (not a string) so every
+    /// producer formats it identically — downstream numeric range queries on
+    /// `gt.generation` stay sound.
+    pub fn with_generation(mut self, v: u64) -> Self {
+        self.generation = Some(v.to_string());
         self
     }
 
@@ -174,7 +178,7 @@ mod tests {
             .with_revision_id("01JTKR")
             .with_pack_id("customer.support@1.2.0")
             .with_env_pack_kind("greentic.deployer.k8s")
-            .with_generation("3");
+            .with_generation(3);
         let kv = ctx.kv();
         let get = |k: &str| kv.iter().find(|(key, _)| *key == k).and_then(|(_, v)| *v);
         assert_eq!(get("gt.tenant"), Some("acme"));
@@ -194,11 +198,15 @@ mod tests {
         let ctx = TelemetryCtx::new("acme");
         let kv = ctx.kv();
         for key in [
+            "gt.team",
             "gt.env",
             "gt.customer_id",
             "gt.deployment_id",
             "gt.bundle_id",
             "gt.revision_id",
+            "gt.pack_id",
+            "gt.env_pack_kind",
+            "gt.generation",
         ] {
             let entry = kv.iter().find(|(k, _)| *k == key).expect("key present");
             assert_eq!(entry.1, None, "{key} must be None when unset");
@@ -224,7 +232,7 @@ mod tests {
             .with_team("support")
             .with_pack_id("p@1")
             .with_env_pack_kind("greentic.deployer.k8s")
-            .with_generation("3");
+            .with_generation(3);
         let attrs = ctx.metric_attrs();
         let keys: Vec<&str> = attrs.iter().map(|(k, _)| *k).collect();
         assert_eq!(keys, vec!["gt.tenant", "gt.env", "gt.bundle_id"]);

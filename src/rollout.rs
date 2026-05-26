@@ -61,6 +61,14 @@ impl RolloutEvent {
 /// OTLP-only `set_attribute`, so the attribution reaches fmt/json subscribers
 /// too — the identifiers operators need during a rollout incident survive even
 /// when no OTLP exporter is configured.
+///
+/// The span and the inner event are both intentional and serve different
+/// backends: the span is the structured trace item carrying the full
+/// attribution, while the `info!` is the log-visible line (a spans-only `fmt`
+/// subscriber emits nothing for a span unless `FmtSpan` events are enabled).
+/// Both carry `rollout.event`; in a backend that materializes span-events as
+/// separate countable rows, filter on the `greentic.rollout` span to avoid
+/// double-counting a single transition.
 pub fn emit_rollout_event(event: RolloutEvent, tctx: &TelemetryCtx) {
     let span = tracing::info_span!(
         "greentic.rollout",
@@ -124,7 +132,7 @@ mod tests {
             .with_deployment_id("01JTKS")
             .with_bundle_id("customer.support")
             .with_revision_id("01JTKR")
-            .with_generation("3");
+            .with_generation(3);
         emit_rollout_event(RolloutEvent::TrafficSplitApplied, &ctx);
         emit_rollout_event(RolloutEvent::HealthGateFailed, &ctx);
     }
@@ -132,10 +140,19 @@ mod tests {
     /// Regression for the Codex finding: the rollout attribution must reach
     /// subscribers WITHOUT relying on OTLP span export. A plain registry layer
     /// (no `otlp`/`azure`/`gcp` feature, no task-local bridge) must still see
-    /// the revision/bundle/deployment/pack/env-pack/generation identifiers.
+    /// the full `gt.*` attribution.
+    ///
+    /// This also guards the kv()/callsite coupling: `emit_rollout_event`
+    /// declares each `gt.*` field at the span callsite, and `Span::record`
+    /// silently drops any field not declared there. The context below sets
+    /// **every** `TelemetryCtx` field, and the assertion requires the captured
+    /// `gt.*` set to equal exactly what `kv()` reports — so a field added to
+    /// `kv()` without a matching span declaration fails here rather than
+    /// vanishing silently from rollout events. When you add a `TelemetryCtx`
+    /// field, set it here too.
     #[test]
     fn rollout_fields_survive_on_non_otlp_subscriber() {
-        use std::collections::BTreeMap;
+        use std::collections::{BTreeMap, BTreeSet};
         use std::sync::{Arc, Mutex};
         use tracing::Subscriber;
         use tracing::field::{Field, Visit};
@@ -171,34 +188,55 @@ mod tests {
             }
         }
 
+        // Every field populated, so kv() yields all gt.* keys as Some.
+        let ctx = TelemetryCtx::new("acme")
+            .with_team("support")
+            .with_session("sess-1")
+            .with_flow("flow-1")
+            .with_node("node-7")
+            .with_provider("openai")
+            .with_env("prod-eu")
+            .with_customer_id("cust-acme")
+            .with_deployment_id("01JTKS")
+            .with_bundle_id("customer.support")
+            .with_revision_id("01JTKR")
+            .with_pack_id("customer.support@1.2.0")
+            .with_env_pack_kind("greentic.deployer.k8s")
+            .with_generation(3);
+
         let store = Arc::new(Mutex::new(BTreeMap::new()));
         let subscriber = tracing_subscriber::registry().with(Capture(Arc::clone(&store)));
         tracing::subscriber::with_default(subscriber, || {
-            let ctx = TelemetryCtx::new("acme")
-                .with_team("support")
-                .with_env("prod-eu")
-                .with_deployment_id("01JTKS")
-                .with_bundle_id("customer.support")
-                .with_revision_id("01JTKR")
-                .with_pack_id("customer.support@1.2.0")
-                .with_env_pack_kind("greentic.deployer.k8s")
-                .with_generation("3");
             emit_rollout_event(RolloutEvent::TrafficSplitApplied, &ctx);
         });
 
         let got = store.lock().unwrap();
-        let f = |k: &str| got.get(k).map(String::as_str);
-        assert_eq!(f("rollout.event"), Some("rollout.traffic_split.applied"));
-        assert_eq!(f("gt.tenant"), Some("acme"));
-        assert_eq!(f("gt.team"), Some("support"));
-        assert_eq!(f("gt.env"), Some("prod-eu"));
-        assert_eq!(f("gt.deployment_id"), Some("01JTKS"));
-        assert_eq!(f("gt.bundle_id"), Some("customer.support"));
-        assert_eq!(f("gt.revision_id"), Some("01JTKR"));
-        assert_eq!(f("gt.pack_id"), Some("customer.support@1.2.0"));
-        assert_eq!(f("gt.env_pack_kind"), Some("greentic.deployer.k8s"));
-        assert_eq!(f("gt.generation"), Some("3"));
-        // Unset optional fields must not surface with a value.
-        assert_eq!(f("gt.customer_id"), None);
+        // The discriminant and a few representative IDs survive with values.
+        assert_eq!(
+            got.get("rollout.event").map(String::as_str),
+            Some("rollout.traffic_split.applied")
+        );
+        assert_eq!(got.get("gt.tenant").map(String::as_str), Some("acme"));
+        assert_eq!(
+            got.get("gt.deployment_id").map(String::as_str),
+            Some("01JTKS")
+        );
+        assert_eq!(got.get("gt.generation").map(String::as_str), Some("3"));
+
+        // Drift guard: the captured gt.* set must equal kv()'s key set exactly.
+        let captured: BTreeSet<&str> = got
+            .keys()
+            .map(String::as_str)
+            .filter(|k| k.starts_with("gt."))
+            .collect();
+        let expected: BTreeSet<&str> = ctx
+            .kv()
+            .into_iter()
+            .filter_map(|(k, v)| v.map(|_| k))
+            .collect();
+        assert_eq!(
+            captured, expected,
+            "every gt.* key from kv() must be declared at the rollout span callsite"
+        );
     }
 }
