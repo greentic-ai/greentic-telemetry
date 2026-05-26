@@ -16,12 +16,14 @@
 ///
 /// `#[non_exhaustive]`: construct via [`TelemetryCtx::new`] + the `with_*`
 /// builders, never a struct literal. The field set grows as the rollout model
-/// gains attributes (C5 adds `pack_id`, env-pack `kind`, rollout generation),
-/// and this keeps each addition non-breaking for downstream crates.
+/// gains attributes, and this keeps each addition non-breaking for downstream
+/// crates.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct TelemetryCtx {
     pub tenant: String,
+    /// Team scope within the tenant. Span/log only — unbounded.
+    pub team: Option<String>,
     pub session: Option<String>,
     pub flow: Option<String>,
     pub node: Option<String>,
@@ -36,6 +38,14 @@ pub struct TelemetryCtx {
     pub bundle_id: Option<String>,
     /// Immutable revision id. Span/log only — unbounded.
     pub revision_id: Option<String>,
+    /// Pack id the invocation resolved to (C5). Span/log only — unbounded.
+    pub pack_id: Option<String>,
+    /// Env-pack kind backing the environment (C5, e.g. `greentic.deployer.k8s`).
+    /// Span/log only — unbounded.
+    pub env_pack_kind: Option<String>,
+    /// Rollout generation of the deployment's routing table (C5). Stringified
+    /// `u64`. Span/log only — unbounded.
+    pub generation: Option<String>,
 }
 
 impl TelemetryCtx {
@@ -44,6 +54,11 @@ impl TelemetryCtx {
             tenant: tenant.into(),
             ..Self::default()
         }
+    }
+
+    pub fn with_team(mut self, v: impl Into<String>) -> Self {
+        self.team = Some(v.into());
+        self
     }
 
     pub fn with_session(mut self, v: impl Into<String>) -> Self {
@@ -91,11 +106,27 @@ impl TelemetryCtx {
         self
     }
 
+    pub fn with_pack_id(mut self, v: impl Into<String>) -> Self {
+        self.pack_id = Some(v.into());
+        self
+    }
+
+    pub fn with_env_pack_kind(mut self, v: impl Into<String>) -> Self {
+        self.env_pack_kind = Some(v.into());
+        self
+    }
+
+    pub fn with_generation(mut self, v: impl Into<String>) -> Self {
+        self.generation = Some(v.into());
+        self
+    }
+
     /// Full attribute set for **spans and logs**. High-cardinality IDs are
     /// included here on purpose (traces/logs aren't aggregated).
-    pub fn kv(&self) -> [(&'static str, Option<&str>); 10] {
+    pub fn kv(&self) -> [(&'static str, Option<&str>); 14] {
         [
             ("gt.tenant", Some(self.tenant.as_str())),
+            ("gt.team", self.team.as_deref()),
             ("gt.session", self.session.as_deref()),
             ("gt.flow", self.flow.as_deref()),
             ("gt.node", self.node.as_deref()),
@@ -105,6 +136,9 @@ impl TelemetryCtx {
             ("gt.deployment_id", self.deployment_id.as_deref()),
             ("gt.bundle_id", self.bundle_id.as_deref()),
             ("gt.revision_id", self.revision_id.as_deref()),
+            ("gt.pack_id", self.pack_id.as_deref()),
+            ("gt.env_pack_kind", self.env_pack_kind.as_deref()),
+            ("gt.generation", self.generation.as_deref()),
         ]
     }
 
@@ -132,19 +166,27 @@ mod tests {
     #[test]
     fn kv_includes_revision_scoped_ids_when_set() {
         let ctx = TelemetryCtx::new("acme")
+            .with_team("support")
             .with_env("prod-eu")
             .with_customer_id("cust-acme")
             .with_deployment_id("01JTKS")
             .with_bundle_id("customer.support")
-            .with_revision_id("01JTKR");
+            .with_revision_id("01JTKR")
+            .with_pack_id("customer.support@1.2.0")
+            .with_env_pack_kind("greentic.deployer.k8s")
+            .with_generation("3");
         let kv = ctx.kv();
         let get = |k: &str| kv.iter().find(|(key, _)| *key == k).and_then(|(_, v)| *v);
         assert_eq!(get("gt.tenant"), Some("acme"));
+        assert_eq!(get("gt.team"), Some("support"));
         assert_eq!(get("gt.env"), Some("prod-eu"));
         assert_eq!(get("gt.customer_id"), Some("cust-acme"));
         assert_eq!(get("gt.deployment_id"), Some("01JTKS"));
         assert_eq!(get("gt.bundle_id"), Some("customer.support"));
         assert_eq!(get("gt.revision_id"), Some("01JTKR"));
+        assert_eq!(get("gt.pack_id"), Some("customer.support@1.2.0"));
+        assert_eq!(get("gt.env_pack_kind"), Some("greentic.deployer.k8s"));
+        assert_eq!(get("gt.generation"), Some("3"));
     }
 
     #[test]
@@ -178,16 +220,25 @@ mod tests {
             .with_revision_id("01JTKR")
             .with_session("sess-1")
             .with_node("node-7");
+        let ctx = ctx
+            .with_team("support")
+            .with_pack_id("p@1")
+            .with_env_pack_kind("greentic.deployer.k8s")
+            .with_generation("3");
         let attrs = ctx.metric_attrs();
         let keys: Vec<&str> = attrs.iter().map(|(k, _)| *k).collect();
         assert_eq!(keys, vec!["gt.tenant", "gt.env", "gt.bundle_id"]);
         // The unbounded IDs must never reach metric labels.
         for forbidden in [
+            "gt.team",
             "gt.customer_id",
             "gt.deployment_id",
             "gt.revision_id",
             "gt.session",
             "gt.node",
+            "gt.pack_id",
+            "gt.env_pack_kind",
+            "gt.generation",
         ] {
             assert!(
                 !keys.contains(&forbidden),
