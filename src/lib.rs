@@ -26,6 +26,7 @@ pub mod export;
 pub mod host_bridge;
 pub mod init;
 pub mod layer;
+pub mod observer_bridge;
 pub mod operation_subs;
 pub mod presets;
 pub mod provider;
@@ -46,6 +47,7 @@ pub use init::{
     TelemetryConfig, init_telemetry, init_telemetry_auto, init_telemetry_from_config, shutdown,
 };
 pub use layer::{layer_from_task_local, layer_with_provider};
+pub use observer_bridge::{ObserverBridge, ObserverBridgeLayer, ObserverEvent, ObserverSink};
 pub use operation_subs::OperationSubsConfig;
 pub use provider::TelemetryProviderConfig;
 pub use secrets::*;
