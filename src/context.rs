@@ -16,8 +16,18 @@
 ///
 /// `#[non_exhaustive]`: construct via [`TelemetryCtx::new`] + the `with_*`
 /// builders, never a struct literal. The field set grows as the rollout model
-/// gains attributes, and this keeps each addition non-breaking for downstream
-/// crates.
+/// gains attributes, and the attribute keeps each addition non-breaking for
+/// downstream **struct construction** — external code that uses builders is
+/// unaffected when a new field arrives.
+///
+/// [`kv`](Self::kv) is a separate API: its return type is a fixed-length
+/// array whose length grows in lockstep with the field set. Consumers MUST
+/// treat the result as an iterable or slice-coerce it (`for (k, v) in
+/// ctx.kv()` / `let kv = ctx.kv(); helper(&kv)`); binding to a typed
+/// fixed-length array (`let kv: [(&'static str, Option<&str>); N] =
+/// ctx.kv()`) opts into a per-field-bump break. Every consumer in the
+/// workspace iterates or slice-coerces, so adding a field stays
+/// source-compatible in practice.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct TelemetryCtx {
