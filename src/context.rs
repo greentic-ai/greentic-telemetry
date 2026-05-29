@@ -16,18 +16,8 @@
 ///
 /// `#[non_exhaustive]`: construct via [`TelemetryCtx::new`] + the `with_*`
 /// builders, never a struct literal. The field set grows as the rollout model
-/// gains attributes, and the attribute keeps each addition non-breaking for
-/// downstream **struct construction** — external code that uses builders is
-/// unaffected when a new field arrives.
-///
-/// [`kv`](Self::kv) is a separate API: its return type is a fixed-length
-/// array whose length grows in lockstep with the field set. Consumers MUST
-/// treat the result as an iterable or slice-coerce it (`for (k, v) in
-/// ctx.kv()` / `let kv = ctx.kv(); helper(&kv)`); binding to a typed
-/// fixed-length array (`let kv: [(&'static str, Option<&str>); N] =
-/// ctx.kv()`) opts into a per-field-bump break. Every consumer in the
-/// workspace iterates or slice-coerces, so adding a field stays
-/// source-compatible in practice.
+/// gains attributes; the attribute keeps each addition non-breaking for
+/// builder-based construction.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct TelemetryCtx {
@@ -57,12 +47,8 @@ pub struct TelemetryCtx {
     /// decimal string of a `u64` (set via [`with_generation`](Self::with_generation)).
     /// Span/log only — unbounded.
     pub generation: Option<String>,
-    /// Messaging endpoint id the inbound activity arrived on (M1.4). One env
-    /// hosts many provider instances of the same type (e.g. `teams-legal` and
-    /// `teams-accounting`); this discriminates them on traces and logs.
-    /// Span/log only — kept out of metric labels for consistency with the
-    /// other rollout IDs, even though the endpoint set is bounded by env
-    /// topology.
+    /// Messaging endpoint id the inbound activity arrived on (M1.4, e.g.
+    /// `teams-legal` vs `teams-accounting`). Span/log only — unbounded.
     pub messaging_endpoint_id: Option<String>,
 }
 
@@ -149,6 +135,12 @@ impl TelemetryCtx {
 
     /// Full attribute set for **spans and logs**. High-cardinality IDs are
     /// included here on purpose (traces/logs aren't aggregated).
+    ///
+    /// The returned shape is a fixed-length array whose length grows in
+    /// lockstep with the field set. Consumers MUST iterate it or
+    /// slice-coerce it (`for (k, v) in ctx.kv()` / `let kv = ctx.kv();
+    /// helper(&kv)`); binding the result to a typed `[(&'static str,
+    /// Option<&str>); N]` opts into a per-field-bump break.
     pub fn kv(&self) -> [(&'static str, Option<&str>); 15] {
         [
             ("gt.tenant", Some(self.tenant.as_str())),
