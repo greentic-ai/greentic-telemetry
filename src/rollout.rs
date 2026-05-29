@@ -87,6 +87,7 @@ pub fn emit_rollout_event(event: RolloutEvent, tctx: &TelemetryCtx) {
         gt.pack_id = tracing::field::Empty,
         gt.env_pack_kind = tracing::field::Empty,
         gt.generation = tracing::field::Empty,
+        gt.messaging_endpoint_id = tracing::field::Empty,
     );
     for (key, value) in tctx.kv() {
         if let Some(v) = value {
@@ -202,7 +203,8 @@ mod tests {
             .with_revision_id("01JTKR")
             .with_pack_id("customer.support@1.2.0")
             .with_env_pack_kind("greentic.deployer.k8s")
-            .with_generation(3);
+            .with_generation(3)
+            .with_messaging_endpoint_id("teams-legal");
 
         let store = Arc::new(Mutex::new(BTreeMap::new()));
         let subscriber = tracing_subscriber::registry().with(Capture(Arc::clone(&store)));
