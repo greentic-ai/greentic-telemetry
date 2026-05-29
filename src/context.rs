@@ -16,8 +16,8 @@
 ///
 /// `#[non_exhaustive]`: construct via [`TelemetryCtx::new`] + the `with_*`
 /// builders, never a struct literal. The field set grows as the rollout model
-/// gains attributes, and this keeps each addition non-breaking for downstream
-/// crates.
+/// gains attributes; the attribute keeps each addition non-breaking for
+/// builder-based construction.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct TelemetryCtx {
@@ -47,6 +47,9 @@ pub struct TelemetryCtx {
     /// decimal string of a `u64` (set via [`with_generation`](Self::with_generation)).
     /// Span/log only — unbounded.
     pub generation: Option<String>,
+    /// Messaging endpoint id the inbound activity arrived on (M1.4, e.g.
+    /// `teams-legal` vs `teams-accounting`). Span/log only — unbounded.
+    pub messaging_endpoint_id: Option<String>,
 }
 
 impl TelemetryCtx {
@@ -125,9 +128,20 @@ impl TelemetryCtx {
         self
     }
 
+    pub fn with_messaging_endpoint_id(mut self, v: impl Into<String>) -> Self {
+        self.messaging_endpoint_id = Some(v.into());
+        self
+    }
+
     /// Full attribute set for **spans and logs**. High-cardinality IDs are
     /// included here on purpose (traces/logs aren't aggregated).
-    pub fn kv(&self) -> [(&'static str, Option<&str>); 14] {
+    ///
+    /// The returned shape is a fixed-length array whose length grows in
+    /// lockstep with the field set. Consumers MUST iterate it or
+    /// slice-coerce it (`for (k, v) in ctx.kv()` / `let kv = ctx.kv();
+    /// helper(&kv)`); binding the result to a typed `[(&'static str,
+    /// Option<&str>); N]` opts into a per-field-bump break.
+    pub fn kv(&self) -> [(&'static str, Option<&str>); 15] {
         [
             ("gt.tenant", Some(self.tenant.as_str())),
             ("gt.team", self.team.as_deref()),
@@ -143,6 +157,10 @@ impl TelemetryCtx {
             ("gt.pack_id", self.pack_id.as_deref()),
             ("gt.env_pack_kind", self.env_pack_kind.as_deref()),
             ("gt.generation", self.generation.as_deref()),
+            (
+                "gt.messaging_endpoint_id",
+                self.messaging_endpoint_id.as_deref(),
+            ),
         ]
     }
 
@@ -178,7 +196,8 @@ mod tests {
             .with_revision_id("01JTKR")
             .with_pack_id("customer.support@1.2.0")
             .with_env_pack_kind("greentic.deployer.k8s")
-            .with_generation(3);
+            .with_generation(3)
+            .with_messaging_endpoint_id("teams-legal");
         let kv = ctx.kv();
         let get = |k: &str| kv.iter().find(|(key, _)| *key == k).and_then(|(_, v)| *v);
         assert_eq!(get("gt.tenant"), Some("acme"));
@@ -191,6 +210,7 @@ mod tests {
         assert_eq!(get("gt.pack_id"), Some("customer.support@1.2.0"));
         assert_eq!(get("gt.env_pack_kind"), Some("greentic.deployer.k8s"));
         assert_eq!(get("gt.generation"), Some("3"));
+        assert_eq!(get("gt.messaging_endpoint_id"), Some("teams-legal"));
     }
 
     #[test]
@@ -207,6 +227,7 @@ mod tests {
             "gt.pack_id",
             "gt.env_pack_kind",
             "gt.generation",
+            "gt.messaging_endpoint_id",
         ] {
             let entry = kv.iter().find(|(k, _)| *k == key).expect("key present");
             assert_eq!(entry.1, None, "{key} must be None when unset");
@@ -232,7 +253,8 @@ mod tests {
             .with_team("support")
             .with_pack_id("p@1")
             .with_env_pack_kind("greentic.deployer.k8s")
-            .with_generation(3);
+            .with_generation(3)
+            .with_messaging_endpoint_id("teams-legal");
         let attrs = ctx.metric_attrs();
         let keys: Vec<&str> = attrs.iter().map(|(k, _)| *k).collect();
         assert_eq!(keys, vec!["gt.tenant", "gt.env", "gt.bundle_id"]);
@@ -247,6 +269,7 @@ mod tests {
             "gt.pack_id",
             "gt.env_pack_kind",
             "gt.generation",
+            "gt.messaging_endpoint_id",
         ] {
             assert!(
                 !keys.contains(&forbidden),
