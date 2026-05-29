@@ -47,7 +47,10 @@ pub use init::{
     TelemetryConfig, init_telemetry, init_telemetry_auto, init_telemetry_from_config, shutdown,
 };
 pub use layer::{layer_from_task_local, layer_with_provider};
-pub use observer_bridge::{ObserverBridge, ObserverBridgeLayer, ObserverEvent, ObserverSink};
+pub use observer_bridge::{
+    ObserverBridge, ObserverBridgeLayer, ObserverEvent, ObserverSink, global_observer_bridge,
+    register_observer_sink,
+};
 pub use operation_subs::OperationSubsConfig;
 pub use provider::TelemetryProviderConfig;
 pub use secrets::*;

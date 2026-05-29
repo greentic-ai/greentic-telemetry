@@ -7,7 +7,7 @@
 //! impls (e.g. `greentic-dw-observer::Observer`) live in the consumer.
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracing::{Level, Subscriber};
@@ -69,6 +69,21 @@ impl ObserverBridge {
 
 pub struct ObserverBridgeLayer {
     sinks: Arc<RwLock<Vec<Arc<dyn ObserverSink>>>>,
+}
+
+/// Process-global bridge. Lazily initialised on first access so callers can
+/// `register_observer_sink(...)` at any point during startup without coordinating
+/// who creates the bridge.
+static GLOBAL_BRIDGE: OnceLock<ObserverBridge> = OnceLock::new();
+
+/// Returns (and lazily creates) the process-global `ObserverBridge`.
+pub fn global_observer_bridge() -> &'static ObserverBridge {
+    GLOBAL_BRIDGE.get_or_init(ObserverBridge::new)
+}
+
+/// Convenience: register a sink on the global bridge.
+pub fn register_observer_sink(sink: Arc<dyn ObserverSink>) {
+    global_observer_bridge().register(sink);
 }
 
 impl<S> Layer<S> for ObserverBridgeLayer
