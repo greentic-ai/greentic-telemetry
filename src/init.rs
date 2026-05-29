@@ -47,6 +47,8 @@ use crate::export::Compression;
 #[cfg(any(feature = "otlp", feature = "azure", feature = "gcp"))]
 use crate::export::Sampling;
 use crate::export::{ExportConfig, ExportMode};
+#[cfg(any(feature = "dev", feature = "prod-json"))]
+use crate::observer_bridge::global_observer_bridge;
 use crate::redaction;
 #[cfg(any(feature = "dev", feature = "prod-json"))]
 use crate::redaction::RedactingFormatFields;
@@ -150,6 +152,7 @@ fn init_fmt_layers(_cfg: &TelemetryConfig) -> Result<()> {
             .fmt_fields(RedactingFormatFields)
             .json();
 
+        let observer_layer = global_observer_bridge().layer::<tracing_subscriber::Registry>();
         #[cfg(any(feature = "otlp", feature = "azure", feature = "gcp"))]
         {
             let initial_otel: Option<BoxedOtelLayer> = TRACER_PROVIDER.get().map(|p| {
@@ -164,6 +167,7 @@ fn init_fmt_layers(_cfg: &TelemetryConfig) -> Result<()> {
                 .with(reload_layer)
                 .with(layer_stdout)
                 .with(layer_file)
+                .with(observer_layer)
                 .try_init();
         }
         #[cfg(not(any(feature = "otlp", feature = "azure", feature = "gcp")))]
@@ -172,6 +176,7 @@ fn init_fmt_layers(_cfg: &TelemetryConfig) -> Result<()> {
                 .with(filter)
                 .with(layer_stdout)
                 .with(layer_file)
+                .with(observer_layer)
                 .try_init();
         }
     }
@@ -183,6 +188,7 @@ fn init_fmt_layers(_cfg: &TelemetryConfig) -> Result<()> {
             .with_target(true)
             .with_span_list(true)
             .fmt_fields(RedactingFormatFields);
+        let observer_layer = global_observer_bridge().layer::<tracing_subscriber::Registry>();
         #[cfg(any(feature = "otlp", feature = "azure", feature = "gcp"))]
         {
             let initial_otel: Option<BoxedOtelLayer> = TRACER_PROVIDER.get().map(|p| {
@@ -196,6 +202,7 @@ fn init_fmt_layers(_cfg: &TelemetryConfig) -> Result<()> {
                 .with(filter)
                 .with(reload_layer)
                 .with(layer_json)
+                .with(observer_layer)
                 .try_init();
         }
         #[cfg(not(any(feature = "otlp", feature = "azure", feature = "gcp")))]
@@ -203,6 +210,7 @@ fn init_fmt_layers(_cfg: &TelemetryConfig) -> Result<()> {
             let _ = tracing_subscriber::registry()
                 .with(filter)
                 .with(layer_json)
+                .with(observer_layer)
                 .try_init();
         }
     }
