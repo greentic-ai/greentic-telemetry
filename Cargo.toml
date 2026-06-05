@@ -107,7 +107,7 @@ tokio = { version = "1", default-features = false, features = ["macros", "rt"] }
 wit-bindgen = { version = "0.57", optional = true }
 
 [dev-dependencies]
-uuid = { version = "1", features = ["v4"] }
+opentelemetry-appender-tracing = "0.31"
 # In-memory OTLP log exporter for the logs-bridge test (tests/otlp_logs.rs).
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "metrics", "logs", "testing"] }
-opentelemetry-appender-tracing = "0.31"
+uuid = { version = "1", features = ["v4"] }

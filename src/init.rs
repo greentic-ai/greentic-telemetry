@@ -113,8 +113,7 @@ fn build_otel_layer() -> Option<BoxedOtelLayer> {
 
     #[cfg(feature = "otlp")]
     if let Some(logger) = LOGGER_PROVIDER.get() {
-        let bridge =
-            opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(logger);
+        let bridge = opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(logger);
         return Some(tracer_layer.and_then(bridge).boxed());
     }
 
