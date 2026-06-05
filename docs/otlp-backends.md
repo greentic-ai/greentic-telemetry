@@ -2,10 +2,25 @@
 
 ## Overview
 
-`greentic-telemetry` supports exporting traces and metrics to any
+`greentic-telemetry` supports exporting traces, metrics, and logs to any
 OpenTelemetry-compatible backend via OTLP gRPC or HTTP. Configuration is
 handled through `TelemetryProviderConfig`, which can be set manually or
 resolved from a telemetry provider pack (`telemetry-otlp`).
+
+### Signals exported
+
+| Signal | OTLP (grpc/http) | Azure App Insights | AWS X-Ray | GCP Cloud Trace |
+|--------|:---:|:---:|:---:|:---:|
+| Traces | ✓ | ✓ | ✓ | ✓ |
+| Metrics | ✓ | ✓ | ✓ | — |
+| Logs | ✓ | — | — | — |
+
+Logs are bridged from `tracing` events to OTLP **log records** via
+`opentelemetry-appender-tracing` (`OpenTelemetryTracingBridge`), composed onto
+the same subscriber layer as the span tracer. They therefore share the single
+global `EnvFilter` — `RUST_LOG` governs trace, span, and log output uniformly.
+Log export is wired only for the OTLP modes today; the vendor cloud exporters
+(Azure/AWS/GCP) still emit traces/metrics only.
 
 ## Export Modes
 
