@@ -36,6 +36,7 @@ otlp = [
     "opentelemetry-otlp",
     "opentelemetry_sdk",
     "tracing-opentelemetry",
+    "dep:opentelemetry-appender-tracing",
 ]
 dev = ["dep:tracing-appender"]
 prod-json = []
@@ -115,6 +116,7 @@ version = "0.31"
 features = [
     "trace",
     "metrics",
+    "logs",
 ]
 optional = true
 
@@ -124,6 +126,7 @@ features = [
     "grpc-tonic",
     "http-proto",
     "metrics",
+    "logs",
 ]
 optional = true
 
@@ -132,6 +135,7 @@ version = "0.31"
 features = [
     "rt-tokio",
     "metrics",
+    "logs",
 ]
 optional = true
 
@@ -151,6 +155,10 @@ optional = true
 
 [dependencies.blake3]
 version = "1"
+optional = true
+
+[dependencies.opentelemetry-appender-tracing]
+version = "0.31"
 optional = true
 
 [dependencies.opentelemetry-application-insights]
@@ -227,6 +235,11 @@ optional = true
 [dependencies.http]
 version = "1"
 optional = true
+
+[dev-dependencies]
+opentelemetry-appender-tracing = "0.31"
+# In-memory OTLP log exporter for the logs-bridge test (tests/otlp_logs.rs).
+opentelemetry_sdk = { version = "0.31", features = ["rt-tokio", "metrics", "logs", "testing"] }
 
 [dev-dependencies.uuid]
 version = "1"

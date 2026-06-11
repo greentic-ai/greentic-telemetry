@@ -4,8 +4,10 @@ use once_cell::sync::OnceCell;
 use opentelemetry::{KeyValue, global};
 #[cfg(feature = "otlp")]
 use opentelemetry_otlp::{
-    MetricExporter, SpanExporter, WithExportConfig, WithHttpConfig, WithTonicConfig,
+    LogExporter, MetricExporter, SpanExporter, WithExportConfig, WithHttpConfig, WithTonicConfig,
 };
+#[cfg(feature = "otlp")]
+use opentelemetry_sdk::logs::SdkLoggerProvider;
 #[cfg(any(feature = "otlp", feature = "azure", feature = "gcp"))]
 use opentelemetry_sdk::{
     metrics::SdkMeterProvider,
@@ -56,6 +58,8 @@ static INITED: OnceCell<()> = OnceCell::new();
 static TRACER_PROVIDER: OnceCell<SdkTracerProvider> = OnceCell::new();
 #[cfg(any(feature = "otlp", feature = "azure", feature = "gcp"))]
 static METER_PROVIDER: OnceCell<SdkMeterProvider> = OnceCell::new();
+#[cfg(feature = "otlp")]
+static LOGGER_PROVIDER: OnceCell<SdkLoggerProvider> = OnceCell::new();
 #[cfg(any(feature = "otlp", feature = "azure", feature = "gcp"))]
 static INIT_GUARD: OnceCell<()> = OnceCell::new();
 
@@ -93,12 +97,34 @@ fn build_resource(service_name: &str, attrs: &HashMap<String, String>) -> Resour
     builder.build()
 }
 
+/// Build the boxed OTel subscriber layer from the installed providers.
+///
+/// Returns `None` until a tracer provider exists. When the `otlp` logs pipeline
+/// is also installed (`LOGGER_PROVIDER` set), the `tracing` events are bridged to
+/// OTLP **log records** via `OpenTelemetryTracingBridge`, composed onto the same
+/// layer as the span tracer. Both ride the single reload slot, so they sit under
+/// the one global `EnvFilter` (RUST_LOG) — fmt output, spans, and logs share one
+/// filter.
+#[cfg(any(feature = "otlp", feature = "azure", feature = "gcp"))]
+fn build_otel_layer() -> Option<BoxedOtelLayer> {
+    use opentelemetry::trace::TracerProvider as _;
+    let tracer = TRACER_PROVIDER.get()?.tracer("greentic-telemetry");
+    let tracer_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+
+    #[cfg(feature = "otlp")]
+    if let Some(logger) = LOGGER_PROVIDER.get() {
+        let bridge = opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(logger);
+        return Some(tracer_layer.and_then(bridge).boxed());
+    }
+
+    Some(tracer_layer.boxed())
+}
+
 #[cfg(any(feature = "otlp", feature = "azure", feature = "gcp"))]
 fn init_otel_subscriber() {
-    use opentelemetry::trace::TracerProvider as _;
-    let provider = TRACER_PROVIDER.get().unwrap();
-    let tracer = provider.tracer("greentic-telemetry");
-    let otel_layer: BoxedOtelLayer = Box::new(tracing_opentelemetry::layer().with_tracer(tracer));
+    let Some(otel_layer) = build_otel_layer() else {
+        return;
+    };
 
     // If a subscriber with a reload handle already exists (Stage 1 set it up),
     // hot-swap the OTel layer into the existing subscriber.
@@ -152,11 +178,7 @@ fn init_fmt_layers(_cfg: &TelemetryConfig) -> Result<()> {
 
         #[cfg(any(feature = "otlp", feature = "azure", feature = "gcp"))]
         {
-            let initial_otel: Option<BoxedOtelLayer> = TRACER_PROVIDER.get().map(|p| {
-                use opentelemetry::trace::TracerProvider as _;
-                Box::new(tracing_opentelemetry::layer().with_tracer(p.tracer("greentic-telemetry")))
-                    as BoxedOtelLayer
-            });
+            let initial_otel: Option<BoxedOtelLayer> = build_otel_layer();
             let (reload_layer, handle) = reload::Layer::new(initial_otel);
             let _ = OTEL_RELOAD_HANDLE.set(handle);
             let _ = tracing_subscriber::registry()
@@ -185,11 +207,7 @@ fn init_fmt_layers(_cfg: &TelemetryConfig) -> Result<()> {
             .fmt_fields(RedactingFormatFields);
         #[cfg(any(feature = "otlp", feature = "azure", feature = "gcp"))]
         {
-            let initial_otel: Option<BoxedOtelLayer> = TRACER_PROVIDER.get().map(|p| {
-                use opentelemetry::trace::TracerProvider as _;
-                Box::new(tracing_opentelemetry::layer().with_tracer(p.tracer("greentic-telemetry")))
-                    as BoxedOtelLayer
-            });
+            let initial_otel: Option<BoxedOtelLayer> = build_otel_layer();
             let (reload_layer, handle) = reload::Layer::new(initial_otel);
             let _ = OTEL_RELOAD_HANDLE.set(handle);
             let _ = tracing_subscriber::registry()
@@ -218,11 +236,7 @@ fn init_fmt_layers(_cfg: &TelemetryConfig) -> Result<()> {
     ))]
     {
         let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-        let initial_otel: Option<BoxedOtelLayer> = TRACER_PROVIDER.get().map(|p| {
-            use opentelemetry::trace::TracerProvider as _;
-            Box::new(tracing_opentelemetry::layer().with_tracer(p.tracer("greentic-telemetry")))
-                as BoxedOtelLayer
-        });
+        let initial_otel: Option<BoxedOtelLayer> = build_otel_layer();
         let (reload_layer, handle) = reload::Layer::new(initial_otel);
         let _ = OTEL_RELOAD_HANDLE.set(handle);
         let _ = tracing_subscriber::registry()
@@ -324,15 +338,25 @@ fn install_otlp_inner(endpoint: &str, resource: Resource) -> Result<()> {
     metric_exporter_builder = metric_exporter_builder.with_endpoint(endpoint.to_string());
     let metric_exporter = metric_exporter_builder.build()?;
     let meter_provider = SdkMeterProvider::builder()
-        .with_resource(resource)
+        .with_resource(resource.clone())
         .with_periodic_exporter(metric_exporter)
         .build();
     global::set_meter_provider(meter_provider.clone());
     let _ = METER_PROVIDER.set(meter_provider);
 
-    // NOTE: The OTel tracing layer is composed into the subscriber by
-    // init_fmt_layers() (which reads TRACER_PROVIDER). Do NOT create a
-    // separate subscriber here — tracing only allows one global subscriber.
+    let log_exporter = LogExporter::builder()
+        .with_tonic()
+        .with_endpoint(endpoint.to_string())
+        .build()?;
+    let logger_provider = SdkLoggerProvider::builder()
+        .with_resource(resource)
+        .with_batch_exporter(log_exporter)
+        .build();
+    let _ = LOGGER_PROVIDER.set(logger_provider);
+
+    // NOTE: The OTel tracing + logs bridge layer is composed into the subscriber
+    // by init_fmt_layers() (which reads TRACER_PROVIDER / LOGGER_PROVIDER). Do NOT
+    // create a separate subscriber here — tracing only allows one global subscriber.
 
     Ok(())
 }
@@ -343,6 +367,10 @@ pub fn shutdown() {
         let _ = provider.shutdown();
     }
     if let Some(provider) = METER_PROVIDER.get() {
+        let _ = provider.shutdown();
+    }
+    #[cfg(feature = "otlp")]
+    if let Some(provider) = LOGGER_PROVIDER.get() {
         let _ = provider.shutdown();
     }
 }
@@ -460,11 +488,37 @@ fn install_otlp_from_export_inner(cfg: TelemetryConfig, export: ExportConfig) ->
     };
 
     let meter_provider = SdkMeterProvider::builder()
-        .with_resource(resource)
+        .with_resource(resource.clone())
         .with_periodic_exporter(metric_exporter)
         .build();
     global::set_meter_provider(meter_provider.clone());
     let _ = METER_PROVIDER.set(meter_provider);
+
+    let log_exporter = if matches!(export.mode, ExportMode::OtlpHttp) {
+        let mut builder = LogExporter::builder()
+            .with_http()
+            .with_endpoint(endpoint.clone());
+        if !export.headers.is_empty() {
+            builder = builder.with_headers(export.headers.clone());
+        }
+        if let Some(compression) = export.compression {
+            builder = builder.with_compression(map_compression(compression));
+        }
+        builder.build().map_err(|e| anyhow!(e.to_string()))?
+    } else {
+        let mut builder = LogExporter::builder()
+            .with_tonic()
+            .with_endpoint(endpoint.clone());
+        if let Some(compression) = export.compression {
+            builder = builder.with_compression(map_compression(compression));
+        }
+        builder.build().map_err(|e| anyhow!(e.to_string()))?
+    };
+    let logger_provider = SdkLoggerProvider::builder()
+        .with_resource(resource)
+        .with_batch_exporter(log_exporter)
+        .build();
+    let _ = LOGGER_PROVIDER.set(logger_provider);
 
     init_otel_subscriber();
 
