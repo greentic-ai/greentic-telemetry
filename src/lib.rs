@@ -30,6 +30,7 @@ pub mod operation_subs;
 pub mod presets;
 pub mod provider;
 pub mod redaction;
+pub mod rollout;
 pub mod secrets;
 pub mod state_subs;
 pub mod tasklocal;
@@ -45,8 +46,11 @@ pub use host_bridge::{HostContext, emit_span as emit_host_span};
 pub use init::{
     TelemetryConfig, init_telemetry, init_telemetry_auto, init_telemetry_from_config, shutdown,
 };
+#[cfg(any(feature = "otlp", feature = "azure", feature = "gcp"))]
+pub use layer::{annotate_current_span, annotate_span};
 pub use layer::{layer_from_task_local, layer_with_provider};
 pub use operation_subs::OperationSubsConfig;
 pub use provider::TelemetryProviderConfig;
+pub use rollout::{RolloutEvent, emit_rollout_event};
 pub use secrets::*;
 pub use tasklocal::{set_current_telemetry_ctx, with_current_telemetry_ctx, with_task_local};
